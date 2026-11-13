@@ -1,0 +1,8 @@
+#!/bin/sh
+# The installed frontend is independent of Noctalia and its plugin directories.
+app="$(dirname -- "$0")/../share/package-menu/app.py"
+if [ ! -f "$app" ]; then
+    echo "package-menu is not installed completely. Run make install from its repository." >&2
+    exit 127
+fi
+exec python3 -I "$app" "$@"

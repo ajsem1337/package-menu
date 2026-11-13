@@ -755,6 +755,14 @@ def main():
 
 
 def run(argv):
+    if argv == ["--version"]:
+        print("package-menu " + (HERE.parent / "VERSION").read_text().strip())
+        return
+    if argv in (["--help"], ["-h"]):
+        print("Usage: package-menu [--aur-helper EXECUTABLE] [--list repos|installed|aur [query]]")
+        print("Arch Linux package TUI. Default AUR helper: paru; use --aur-helper yay to change it.")
+        print("--help, -h  Show this help\n--version   Show the installed version")
+        return
     if argv[:1] == ["--aur-helper"]:
         if len(argv) < 2:
             raise Error("--aur-helper requires an executable.")
@@ -776,9 +784,13 @@ def run(argv):
         raise Error("Usage: package-menu [--aur-helper EXECUTABLE] [--list repos|installed|aur [query]]")
 
 
-if __name__ == "__main__":
+def cli():
     try:
         run(sys.argv[1:])
     except (Error, OSError) as error:
         print(text(error), file=sys.stderr)
         raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    cli()
