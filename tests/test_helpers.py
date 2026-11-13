@@ -33,6 +33,7 @@ class HelperSettingsTests(unittest.TestCase):
                            ("HELPER_UPDATE_ARGS", ["-Syu"]),
                            ("TRAUR_ENABLED", False), ("WRAPPER_ENABLED", False),
                            ("WRAPPER_COMMAND", ""), ("PREVIEW_MODE", "details"),
+                           ("LAST_SKIPPED", []),
                            ("CONFIG_FILE", self.directory / "settings/config.json")):
             mocked = patch.object(app, key, value)
             mocked.start()
@@ -153,16 +154,17 @@ class HelperSettingsTests(unittest.TestCase):
 
     def test_aura_success_runs_both_stages_without_extra_confirmation_or_enter(self):
         app.configure_helper("aura")
-        with patch.object(app, "picker", side_effect=[selected("update"), None]), patch.object(app.subprocess, "call", return_value=0) as transaction, patch.object(app, "confirm", side_effect=AssertionError("no extra prompt")), patch.object(app, "pause") as pause:
+        with patch.object(app, "aur_update_names", return_value=["example"]), patch.object(app, "picker", side_effect=[selected("update"), None]), patch.object(app.subprocess, "call", return_value=0) as transaction, patch.object(app, "confirm", side_effect=AssertionError("no extra prompt")), patch.object(app, "pause") as pause:
             app.main()
-        self.assertEqual(transaction.call_args_list, [call(["aura", "-Syu"]), call(["aura", "-Au"])])
+        self.assertEqual([item.args[0] for item in transaction.call_args_list], [["aura", "-Syu"], ["aura", "-A", "--", "example"]])
         pause.assert_not_called()
 
     def test_helper_failure_is_not_retried_with_pacman(self):
         app.configure_helper("yay")
         with patch.object(app.subprocess, "call", return_value=7) as transaction, contextlib.redirect_stdout(io.StringIO()), self.assertRaises(app.Error):
             app.perform("install", [package()])
-        transaction.assert_called_once_with(["yay", "-S", "--needed", "--aur", "--", "example"])
+        transaction.assert_called_once()
+        self.assertEqual(transaction.call_args.args[0], ["yay", "-S", "--needed", "--aur", "--", "example"])
 
     def test_settings_can_be_opened_from_main_and_cli(self):
         with patch.object(app, "picker", side_effect=[selected("settings"), None]), patch.object(app, "settings_menu") as settings:
@@ -286,7 +288,7 @@ class HelperSettingsTests(unittest.TestCase):
             with self.subTest(helper=helper), patch.object(app.shutil, "which", return_value=wrapper):
                 self.assertEqual(app.transaction_command("install", [package()]),
                                  [helper, "--makepkg", wrapper, "-S", "--needed", "--aur", "--", "example"])
-                self.assertEqual(app.update_commands(), [[helper, "--makepkg", wrapper, "-Syu"]])
+                self.assertEqual(app.update_commands(), [[helper, "-Syu", "--repo"], [helper, "--makepkg", wrapper, "-Sua"]])
 
     def test_wrapper_missing_or_plain_makepkg_blocks_before_transactions(self):
         app.WRAPPER_ENABLED, app.WRAPPER_COMMAND = True, "guard"
@@ -312,22 +314,24 @@ class HelperSettingsTests(unittest.TestCase):
     def test_enabled_traur_shows_score_before_helper_transaction(self):
         app.TRAUR_ENABLED = True
         events = []
-        with patch.object(app, "capture", side_effect=lambda *a, **kw: events.append("scan") or (self.scan_result(), 0)) as capture, patch.object(app.subprocess, "call", side_effect=lambda command: events.append("install") or 0), contextlib.redirect_stdout(io.StringIO()) as output:
+        with patch.object(app, "capture", side_effect=lambda *a, **kw: events.append("scan") or (self.scan_result(), 0)) as capture, patch.object(app.subprocess, "call", side_effect=lambda command, **kwargs: events.append("install") or 0), contextlib.redirect_stdout(io.StringIO()) as output:
             app.perform("install", [package()])
         self.assertEqual(events, ["scan", "install"])
         self.assertIn("Trust score: 85 / 100", output.getvalue())
         capture.assert_called_once_with(["traur", "scan", "example", "--json"], timeout=90, accept_report=True, return_status=True)
 
-    def test_traur_blocks_invalid_incomplete_or_high_risk_results_before_any_install(self):
+    def test_traur_skips_bad_aur_reports_without_blocking_selected_repository_packages(self):
         app.TRAUR_ENABLED = True
         results = [(self.scan_result("Malicious", 0), 1), (self.scan_result("Suspicious", 20), 1),
                    (self.scan_result(status="incomplete"), 0), (self.scan_result(score=True), 0),
                    (self.scan_result(package="other"), 0), (self.scan_result(), 2),
                    (self.scan_result(override_gate_fired="bad-script"), 0), ("not JSON", 0)]
         for result in results:
-            with self.subTest(result=result), patch.object(app, "capture", return_value=result), patch.object(app.subprocess, "call") as transaction, contextlib.redirect_stdout(io.StringIO()), self.assertRaises(app.Error):
-                app.perform("install", [{**package("repo"), "source": "extra"}, package()])
-            transaction.assert_not_called()
+            app.LAST_SKIPPED.clear()
+            with self.subTest(result=result), patch.object(app, "capture", return_value=result), patch.object(app.subprocess, "call", return_value=0) as transaction, contextlib.redirect_stdout(io.StringIO()):
+                app.perform("install", [{**package("repo"), "name": "repo-example", "source": "extra"}, package()])
+            transaction.assert_called_once_with(["sudo", "pacman", "-S", "--needed", "--", "extra/repo-example"])
+            self.assertEqual([item["name"] for item in app.LAST_SKIPPED], ["example"])
 
     def test_disabled_traur_and_repository_only_installs_do_not_scan(self):
         for enabled, records in ((False, [package()]), (True, [{**package("repo"), "source": "extra"}])):
@@ -341,7 +345,8 @@ class HelperSettingsTests(unittest.TestCase):
         with patch.object(app, "capture", side_effect=["example 1 -> 2\n", (self.scan_result(), 0)]) as capture, patch.object(app, "picker", side_effect=[selected("update"), None]), patch.object(app.subprocess, "call", return_value=0) as transaction, contextlib.redirect_stdout(io.StringIO()):
             app.main()
         capture.assert_any_call(["paru", "-Qua", "--color", "never"], timeout=60, empty_ok=True)
-        transaction.assert_called_once_with(["paru", "-Syu"])
+        self.assertEqual([item.args[0] for item in transaction.call_args_list],
+                         [["paru", "-Syu", "--repo"], ["paru", "-S", "--aur", "--", "example"]])
 
     def test_repository_only_update_has_no_traur_scans_or_audit_banner(self):
         app.TRAUR_ENABLED = True
@@ -352,7 +357,7 @@ class HelperSettingsTests(unittest.TestCase):
         info.assert_not_called()
         self.assertNotIn("Traur:", output.getvalue())
         self.assertNotIn("AUR report", output.getvalue())
-        transaction.assert_called_once_with(["paru", "-Syu"])
+        transaction.assert_called_once_with(["paru", "-Syu", "--repo"])
 
     def test_paru_and_yay_update_queries_skip_ignored_packages_and_deduplicate(self):
         output = "update-me 1 -> 2\nignored 1 -> 2 [ignored]\nupdate-me 1 -> 2\nvcs-git 1 -> latest-commit\n"
@@ -369,7 +374,7 @@ class HelperSettingsTests(unittest.TestCase):
             with self.subTest(result=result), patch.object(app, "capture", **parameters), patch.object(app, "audit") as audit, patch.object(app.subprocess, "call") as transaction, patch.object(app, "picker", side_effect=[selected("update"), None]), patch.object(app, "pause") as pause, contextlib.redirect_stdout(io.StringIO()):
                 app.main()
             audit.assert_not_called()
-            transaction.assert_not_called()
+            transaction.assert_called_once_with(["paru", "-Syu", "--repo"])
             pause.assert_called_once_with()
 
     def test_aura_and_custom_compare_versions_not_all_installed_aur_packages(self):

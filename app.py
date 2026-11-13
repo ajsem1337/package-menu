@@ -34,6 +34,7 @@ TRAUR_ENABLED = False
 WRAPPER_ENABLED = False
 WRAPPER_COMMAND = ""
 PREVIEW_MODE = "details"
+LAST_SKIPPED = []
 
 
 class Error(Exception):
@@ -164,6 +165,8 @@ def update_command():
 
 
 def update_commands():
+    if AUR_HELPER and HELPER_STYLE == "pacman":
+        return [[AUR_HELPER, "-Syu", "--repo"], with_wrapper([AUR_HELPER, "-Sua"])]
     commands = [update_command()]
     if AUR_HELPER and HELPER_STYLE == "aura":
         commands.append([AUR_HELPER, "-Au"])
@@ -699,23 +702,105 @@ def confirm(message):
 
 
 def perform(action, records):
-    commands = transaction_commands(action, records)
-    if action == "install" and TRAUR_ENABLED:
-        audit([record for record in records if record["kind"] == "aur"], strict=True)
+    LAST_SKIPPED.clear()
+    validate_selection(records)
     print("\n" + action.upper())
     for record in records:
         print(f"  {record['name']}   [{record['source']}]   {record['version']}")
-    if len(commands) > 1:
-        print(f"Repository packages first, then AUR using your existing {text(AUR_HELPER)}/makepkg configuration.")
+    aur = [record for record in records if record["kind"] == "aur"] if action == "install" else []
+    if aur:
+        # Separate targets so a denied recipe/dependency cannot prevent unrelated
+        # selected packages from proceeding. Never fake a successful makepkg run.
+        repositories = [record for record in records if record["kind"] != "aur"]
+        if repositories:
+            run_transaction(transaction_command(action, repositories))
+        for record in aur:
+            run_aur_target(record)
+        return
+    commands = transaction_commands(action, records)
     if action == "remove":
         print("Pacman will also show any unused dependencies selected for removal.")
     elif action == "downgrade":
         print("Local cache only. No Arch archive fallback and no automatic IgnorePkg changes.")
         print("A downgrade can break dependencies; review pacman's transaction.")
     for command in commands:
-        code = subprocess.call(command)
-        if code:
-            raise Error(f"Package operation stopped (exit {code}). No fallback was attempted.")
+        run_transaction(command)
+
+
+def run_transaction(command, system_update=False):
+    code = subprocess.call(command)
+    if code:
+        label = "System update" if system_update else "Package operation"
+        raise Error(f"{label} stopped (exit {code}). No fallback was attempted.")
+
+
+def skip_package(record, reason, approval_keys=(), preflight=False, updating=False):
+    entry = {"name": valid_name(record["name"]), "reason": text(reason),
+             "approval_keys": list(approval_keys), "preflight": preflight, "updating": updating}
+    LAST_SKIPPED[:] = [item for item in LAST_SKIPPED if item["name"] != entry["name"]]
+    LAST_SKIPPED.append(entry)
+    print(f"\nSKIPPED {entry['name']}: {entry['reason']}\nReview this package before retrying. Continuing with other packages.", flush=True)
+
+
+def skipped_summary():
+    if not LAST_SKIPPED:
+        return ""
+    names = ", ".join(item["name"] for item in LAST_SKIPPED[:4])
+    extra = f" (+{len(LAST_SKIPPED) - 4})" if len(LAST_SKIPPED) > 4 else ""
+    return "Skipped AUR: " + names + extra + " · See Skipped packages in the main menu"
+
+
+def run_aur_target(record, updating=False, force=False, approval_keys=()):
+    command = transaction_command("install", [record])
+    if updating and HELPER_STYLE == "pacman":
+        # Candidates were selected by the helper's upgrade query, including VCS.
+        # Do not let --needed suppress a VCS rebuild with an unchanged version.
+        command.remove("--needed")
+    if TRAUR_ENABLED and not WRAPPER_ENABLED and not force:
+        try:
+            audit([record], strict=True)
+        except Error as error:
+            skip_package(record, error, preflight=True, updating=updating)
+            return False
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    with tempfile.TemporaryDirectory(prefix="package-menu-gate-", dir=runtime) as directory:
+        events = Path(directory) / "events.jsonl"
+        events.touch(mode=0o600)
+        environment = dict(os.environ, PACKAGE_MENU_GATE_EVENT=str(events))
+        environment.pop("PACKAGE_MENU_GATE_APPROVAL", None)
+        if force and approval_keys:
+            approvals = Path(directory) / "approvals.json"
+            with open(approvals, "x", opener=lambda name, flags: os.open(name, flags, 0o600)) as output:
+                json.dump({"version": 1, "keys": list(approval_keys)}, output)
+            environment["PACKAGE_MENU_GATE_APPROVAL"] = str(approvals)
+        code = subprocess.call(command, env=environment)
+        if code < 0 or code in (130, 143):
+            raise KeyboardInterrupt
+        if events.stat().st_size > 65536:
+            raise Error("Invalid wrapper event data. Operation stopped.")
+        reasons = []
+        blocked_keys = []
+        try:
+            for line in events.read_text().splitlines():
+                event = json.loads(line)
+                if (not isinstance(event, dict) or event.get("version") != 1 or event.get("blocked") is not True
+                        or not isinstance(event.get("reason"), str)):
+                    raise ValueError("invalid wrapper event")
+                reasons.append(text(event["reason"]))
+                key = event.get("approval_key")
+                if key is not None:
+                    if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key):
+                        raise ValueError("invalid approval key")
+                    blocked_keys.append(key)
+        except (ValueError, UnicodeError):
+            raise Error("Invalid wrapper event data. Operation stopped.") from None
+    if reasons:
+        skip_package(record, "; ".join(dict.fromkeys(reasons)), blocked_keys, updating=updating)
+        return False
+    if code:
+        raise Error(f"Package operation stopped (exit {code}). No fallback was attempted.")
+    LAST_SKIPPED[:] = [item for item in LAST_SKIPPED if item["name"] != record["name"]]
+    return True
 
 
 def audit(records, strict=False):
@@ -748,7 +833,7 @@ def audit(records, strict=False):
             if strict:
                 raise Error("Traur could not complete the scan. Operation stopped.") from error
             continue
-        if strict and (code != 0 or report["tier"] not in ("Trusted", "Ok", "Sketchy") or report.get("override_gate_fired") is not None):
+        if strict and (code != 0 or report["tier"] not in ("Trusted", "Ok") or report.get("override_gate_fired") is not None):
             raise Error("Traur blocked the operation: " + text(report["tier"]))
     if records:
         print("\nAUR report only; exact build-recipe checks require a makepkg wrapper.")
@@ -802,6 +887,33 @@ def audit_update():
     names = aur_update_names()
     if names:
         audit([{"name": name, "kind": "aur", "source": "aur"} for name in names], strict=True)
+
+
+def update_system():
+    LAST_SKIPPED.clear()
+    if not AUR_HELPER or HELPER_STYLE == "custom":
+        # An arbitrary custom update command cannot be safely split or rewritten.
+        # Its native behavior remains intact; compatible helpers can select the
+        # Paru/yay or Aura command style in Settings for managed AUR updates.
+        commands = update_commands()
+        audit_update()
+        for command in commands:
+            run_transaction(command, system_update=True)
+        return
+    repository_command = [AUR_HELPER, "-Syu"]
+    if HELPER_STYLE == "pacman":
+        repository_command.append("--repo")
+    run_transaction(repository_command, system_update=True)
+    names = aur_update_names()
+    pending = set(names)
+    for index, name in enumerate(names):
+        if name not in pending:
+            continue
+        record = {"name": name, "source": "aur", "kind": "aur", "version": ""}
+        if run_aur_target(record, updating=True) and index + 1 < len(names):
+            # A successful target may have upgraded other targets as dependencies.
+            # Re-query before attempting the next one instead of reinstalling it.
+            pending = set(aur_update_names())
 
 
 def file_digest(value):
@@ -902,6 +1014,8 @@ def browse(action):
         title = {"install": "Find & install", "remove": "Installed / uninstall", "downgrade": "Downgrade (cache only)"}[action]
         merged = action == "install" and bool(AUR_HELPER)
         hints = "Finish selections before changing the search" if merged else ""
+        if LAST_SKIPPED:
+            hints += "\n" + skipped_summary()
         suffix = (" — repos + AUR" if merged else " — repositories") if action == "install" else " — installed"
         selected = picker(records, title + suffix, query, keys=hints, merged=merged, show_state=action == "install")
         if selected is None:
@@ -1032,14 +1146,38 @@ def main_records():
         ("settings", "Settings", "Helper, Traur, wrapper, VirusTotal and package details"),
         ("exit", "Exit", ""),
     ]
+    if LAST_SKIPPED:
+        choices.insert(-2, ("skipped", "Skipped packages", f"Review or install anyway · {len(LAST_SKIPPED)} skipped"))
     return menu_records(choices)
+
+
+def skipped_menu():
+    while LAST_SKIPPED:
+        records = menu_records([(str(index), item["name"], item["reason"]) for index, item in enumerate(LAST_SKIPPED)])
+        selected = picker(records, "Skipped AUR packages", multi=False, preview=False, searchable=False)
+        if selected is None or not selected[2]:
+            return
+        item = LAST_SKIPPED[int(selected[2][0]["id"])]
+        print("\nSKIPPED:", item["name"], "\n", item["reason"], flush=True)
+        if not item["preflight"] and not item["approval_keys"]:
+            print("This wrapper cannot authorize a scoped override. Fix the reported failure first.")
+            pause()
+            continue
+        print("Installing anyway may execute malicious code. This does not add a permanent whitelist entry.")
+        answer = input("Type " + item["name"] + " to install anyway once (empty = back): ").strip()
+        if answer != item["name"]:
+            continue
+        record = {"name": item["name"], "source": "aur", "kind": "aur", "version": ""}
+        run_aur_target(record, updating=item["updating"], force=True, approval_keys=item["approval_keys"])
+        clear_console()
 
 
 def main():
     while True:
         try:
             selected = picker(main_records(), "Packages", multi=False, preview=False, searchable=False,
-                              keys="Helper: " + text(AUR_HELPER) if AUR_HELPER else "Pacman only · AUR disabled")
+                              keys=("Helper: " + text(AUR_HELPER) if AUR_HELPER else "Pacman only · AUR disabled")
+                                   + ("\n" + skipped_summary() if LAST_SKIPPED else ""))
             if selected is None or not selected[2] or selected[2][0]["id"] == "exit":
                 return
             action = selected[2][0]["id"]
@@ -1052,13 +1190,10 @@ def main():
                     pause()
             elif action == "settings":
                 settings_menu()
+            elif action == "skipped":
+                skipped_menu()
             elif action == "update":
-                commands = update_commands()
-                audit_update()
-                for command in commands:
-                    code = subprocess.call(command)
-                    if code:
-                        raise Error(f"System update stopped (exit {code}). No fallback was attempted.")
+                update_system()
                 clear_console()
         except (Error, OSError) as error:
             show_error(error)

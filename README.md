@@ -31,6 +31,10 @@ Pacman is the default. **Settings** provides:
 - **VirusTotal API key**, entered privately.
 - **Package details:** expanded or compact.
 
+Suspicious AUR targets are skipped while unrelated packages continue. Review them
+under **Skipped packages**; installing anyway requires typing the package name.
+This grants one-operation approval, not a permanent whitelist entry.
+
 Settings are saved in `~/.config/package-menu/config.json` (`XDG_CONFIG_HOME`
 is respected). Without an available helper, AUR is disabled.
 `--aur-helper yay` selects a helper for one launch.

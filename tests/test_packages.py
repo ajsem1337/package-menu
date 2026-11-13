@@ -43,6 +43,7 @@ class PackageMenuTests(unittest.TestCase):
                            ("HELPER_UPDATE_ARGS", ["-Syu"]),
                            ("TRAUR_ENABLED", False), ("WRAPPER_ENABLED", False),
                            ("WRAPPER_COMMAND", ""), ("PREVIEW_MODE", "details"),
+                           ("LAST_SKIPPED", []),
                            ("CONFIG_FILE", Path(directory.name) / "config.json")):
             mocked = patch.object(app, key, value)
             mocked.start()
@@ -94,9 +95,9 @@ class PackageMenuTests(unittest.TestCase):
     def test_update_action_uses_helper_without_extra_confirmation_or_success_pause(self):
         app.configure_helper("yay")
         selection = ("", "", [{"id": "update"}])
-        with patch.object(app, "picker", side_effect=[selection, None]), patch.object(app, "confirm", side_effect=AssertionError("no duplicate prompt")), patch.object(app.subprocess, "call", return_value=0) as call, patch.object(app, "pause") as pause:
+        with patch.object(app, "aur_update_names", return_value=[]), patch.object(app, "picker", side_effect=[selection, None]), patch.object(app, "confirm", side_effect=AssertionError("no duplicate prompt")), patch.object(app.subprocess, "call", return_value=0) as call, patch.object(app, "pause") as pause:
             app.main()
-        call.assert_called_once_with(["yay", "-Syu"])
+        call.assert_called_once_with(["yay", "-Syu", "--repo"])
         pause.assert_not_called()
         self.assertNotIn("--noconfirm", call.call_args.args[0])
 
@@ -113,7 +114,8 @@ class PackageMenuTests(unittest.TestCase):
         with patch.object(app, "confirm", return_value=True), patch.object(app.subprocess, "call", side_effect=FileNotFoundError("missing helper")) as call, contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(FileNotFoundError):
                 app.perform("install", records)
-        call.assert_called_once_with(["missing-custom-helper", "-S", "--needed", "--aur", "--", "example"])
+        call.assert_called_once()
+        self.assertEqual(call.call_args.args[0], ["missing-custom-helper", "-S", "--needed", "--aur", "--", "example"])
         self.assertEqual(app.transaction_command("install", [package()])[0:2], ["sudo", "pacman"])
 
     def filter_records(self, records, query):
