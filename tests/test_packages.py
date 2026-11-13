@@ -36,9 +36,17 @@ def render_preview(database, record):
 
 class PackageMenuTests(unittest.TestCase):
     def setUp(self):
-        helper = patch.object(app, "AUR_HELPER", "paru")
-        helper.start()
-        self.addCleanup(helper.stop)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        for key, value in (("AUR_HELPER", "paru"), ("HELPER_STYLE", "pacman"),
+                           ("HELPER_INSTALL_ARGS", ["-S", "--needed", "--aur", "--"]),
+                           ("HELPER_UPDATE_ARGS", ["-Syu"]),
+                           ("TRAUR_ENABLED", False), ("WRAPPER_ENABLED", False),
+                           ("WRAPPER_COMMAND", ""), ("PREVIEW_MODE", "details"),
+                           ("CONFIG_FILE", Path(directory.name) / "config.json")):
+            mocked = patch.object(app, key, value)
+            mocked.start()
+            self.addCleanup(mocked.stop)
 
     def test_custom_helper_is_used_for_aur_search_install_and_update(self):
         for helper in ("paru", "yay", "/opt/my helper/bin/custom-helper"):
@@ -55,7 +63,7 @@ class PackageMenuTests(unittest.TestCase):
 
     def test_helper_cli_and_callback_commands_preserve_executable_as_one_argument(self):
         helper = "/opt/helper with spaces;$(literal)/yay"
-        with patch.object(app, "main") as main:
+        with patch.object(app, "main") as main, patch.object(app.shutil, "which", return_value=helper):
             app.run(["--aur-helper", helper])
             main.assert_called_once_with()
         command = app.frontend_command("--preview", "/tmp/catalog.json")

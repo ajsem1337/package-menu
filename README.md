@@ -6,7 +6,7 @@ A TUI for managing Arch Linux system packages, inspired by [Omarchy](https://oma
 
 ## Install
 
-Requires Python 3.11+, fzf 0.74.5+, pacman, sudo and an AUR helper (`paru` or `yay`).
+Requires Python 3.11+ and fzf 0.74.5+.
 Optional: `downgrade`, `traur`, `xdg-open`.
 
 ```sh
@@ -21,14 +21,25 @@ Add `~/.local/bin` to PATH. To update, pull the repository and run `make install
 
 ```sh
 package-menu
-package-menu --aur-helper yay
 ```
+
+Pacman is the default. **Settings** provides:
+
+- **Use AUR helper**, with a choice of paru, yay, Aura 4+ or custom commands.
+- **Use Traur** to show trust scores before AUR installs/updates.
+- **Use makepkg wrapper** for additional build-time checks (Paru/yay syntax).
+- **VirusTotal API key**, entered privately.
+- **Package details:** expanded or compact.
+
+Settings are saved in `~/.config/package-menu/config.json` (`XDG_CONFIG_HOME`
+is respected). Without an available helper, AUR is disabled.
+`--aur-helper yay` selects a helper for one launch.
 
 - **Find & install:** search and install repository/AUR packages.
 - **Installed / uninstall:** browse and remove installed packages.
 - **Remove orphans:** remove unused dependencies.
 - **Downgrade:** restore versions from local caches.
-- **Update system:** update using the selected AUR helper.
+- **Update system:** update using the selected helper or pacman.
 - **VirusTotal:** look up an existing report by file hash.
 
 | Key | Action |

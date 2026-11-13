@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -22,30 +23,151 @@ import urllib.request
 HOME = Path.home()
 HERE = Path(__file__).resolve()
 VT_KEY = HOME / ".config/package-menu/virustotal.key"
+CONFIG_FILE = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "package-menu/config.json"
 NAME = re.compile(r"[A-Za-z0-9@._+-]+")
 MAX_BATCH = 50
-AUR_HELPER = "paru"
+AUR_HELPER = ""
+HELPER_STYLE = "pacman"
+HELPER_INSTALL_ARGS = ["-S", "--needed", "--aur", "--"]
+HELPER_UPDATE_ARGS = ["-Syu"]
+TRAUR_ENABLED = False
+WRAPPER_ENABLED = False
+WRAPPER_COMMAND = ""
+PREVIEW_MODE = "details"
 
 
 class Error(Exception):
     pass
 
 
-def configure_helper(value):
-    global AUR_HELPER
+def helper_executable(value):
+    if not isinstance(value, str):
+        raise Error("Enter a helper executable or choose Pacman only.")
     value = value.strip()
     if not value or value.startswith("-") or any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise Error("Set a valid AUR helper executable (for example paru, yay or an absolute path).")
+        raise Error("Set a valid helper executable or choose Pacman only.")
+    return value
+
+
+def helper_arguments(value):
+    if not isinstance(value, list) or any(not isinstance(arg, str) or any(ord(char) < 32 or ord(char) == 127 for char in arg) for arg in value):
+        raise Error("Helper arguments must be a list of strings without control characters.")
+    return value.copy()
+
+
+def configure_helper(value, style="auto", install_args=None, update_args=None):
+    global AUR_HELPER, HELPER_STYLE, HELPER_INSTALL_ARGS, HELPER_UPDATE_ARGS
+    value = helper_executable(value)
+    if style not in ("auto", "pacman", "aura", "custom"):
+        raise Error("Unknown helper command style.")
+    install_args = helper_arguments(install_args if install_args is not None else ["-S", "--needed", "--aur", "--"])
+    update_args = helper_arguments(update_args if update_args is not None else ["-Syu"])
+    if value == "pacman":
+        value = ""
+    if style == "auto":
+        style = "aura" if Path(value).name == "aura" else "pacman"
     AUR_HELPER = value
+    HELPER_STYLE = style
+    HELPER_INSTALL_ARGS, HELPER_UPDATE_ARGS = install_args, update_args
+
+
+def read_settings():
+    settings = {"helper_enabled": False, "helper": "paru", "style": "auto",
+                "install_args": ["-S", "--needed", "--aur", "--"], "update_args": ["-Syu"],
+                "traur_enabled": False, "wrapper_enabled": False, "wrapper_command": "", "preview_mode": "details"}
+    if CONFIG_FILE.exists():
+        try:
+            saved = json.loads(CONFIG_FILE.read_text())
+        except (ValueError, UnicodeError):
+            raise Error(f"Invalid settings file: {CONFIG_FILE}") from None
+        if not isinstance(saved, dict):
+            raise Error(f"Invalid settings file: {CONFIG_FILE}")
+        settings.update(saved)
+    validate_settings(settings)
+    return settings
+
+
+def validate_settings(settings):
+    for key in ("helper_enabled", "traur_enabled", "wrapper_enabled"):
+        if type(settings.get(key)) is not bool:
+            raise Error(key + " must be true or false.")
+    helper_executable(settings.get("helper"))
+    if settings.get("style") not in ("auto", "pacman", "aura", "custom"):
+        raise Error("Unknown helper command style.")
+    helper_arguments(settings.get("install_args"))
+    helper_arguments(settings.get("update_args"))
+    if settings.get("preview_mode") not in ("details", "summary"):
+        raise Error("Unknown package details mode.")
+    if settings.get("wrapper_command") != "":
+        helper_executable(settings.get("wrapper_command"))
+
+
+def activate_settings(settings):
+    global TRAUR_ENABLED, WRAPPER_ENABLED, WRAPPER_COMMAND, PREVIEW_MODE
+    validate_settings(settings)
+    helper = helper_executable(settings["helper"]) if settings["helper_enabled"] else "pacman"
+    if helper == "auto":
+        helper = next((name for name in ("paru", "yay", "aura") if shutil.which(name)), "pacman")
+    elif helper != "pacman" and not shutil.which(helper):
+        helper = "pacman"
+    configure_helper(helper, settings["style"], settings["install_args"], settings["update_args"])
+    TRAUR_ENABLED = settings["traur_enabled"]
+    WRAPPER_ENABLED, WRAPPER_COMMAND = settings["wrapper_enabled"], settings["wrapper_command"]
+    PREVIEW_MODE = settings["preview_mode"]
+
+
+def save_settings(settings):
+    validate_settings(settings)
+    CONFIG_FILE.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=CONFIG_FILE.parent, delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump(settings, temporary, indent=2)
+            temporary.write("\n")
+        temporary_path.replace(CONFIG_FILE)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def frontend_command(*args):
     # fzf callbacks run in separate processes; retain the chosen helper there too.
-    return [sys.executable, "-I", str(HERE), "--aur-helper", AUR_HELPER, *args]
+    command = [sys.executable, "-I", str(HERE), "--aur-helper", AUR_HELPER or "pacman",
+               "--helper-style", HELPER_STYLE]
+    if HELPER_STYLE == "custom":
+        command += ["--helper-install-args", json.dumps(HELPER_INSTALL_ARGS),
+                    "--helper-update-args", json.dumps(HELPER_UPDATE_ARGS)]
+    command += ["--runtime-settings", json.dumps({"helper_enabled": bool(AUR_HELPER),
+                "traur_enabled": TRAUR_ENABLED, "wrapper_enabled": WRAPPER_ENABLED,
+                "wrapper_command": WRAPPER_COMMAND, "preview_mode": PREVIEW_MODE})]
+    return [*command, *args]
+
+
+def with_wrapper(command):
+    if not WRAPPER_ENABLED or not AUR_HELPER:
+        return command
+    if HELPER_STYLE != "pacman":
+        raise Error("The makepkg wrapper requires Paru/yay command syntax; this helper is not supported.")
+    wrapper = shutil.which(str(Path(WRAPPER_COMMAND).expanduser())) if WRAPPER_COMMAND else None
+    if not wrapper or Path(wrapper).resolve() == Path("/usr/bin/makepkg").resolve():
+        raise Error("Choose an executable makepkg security wrapper in Settings, not the system makepkg.")
+    return [command[0], "--makepkg", str(Path(wrapper).absolute()), *command[1:]]
 
 
 def update_command():
-    return [AUR_HELPER, "-Syu"]
+    if not AUR_HELPER:
+        return ["sudo", "pacman", "-Syu"]
+    if HELPER_STYLE == "custom":
+        return with_wrapper([AUR_HELPER, *HELPER_UPDATE_ARGS])
+    return with_wrapper([AUR_HELPER, "-Syu"])
+
+
+def update_commands():
+    commands = [update_command()]
+    if AUR_HELPER and HELPER_STYLE == "aura":
+        commands.append([AUR_HELPER, "-Au"])
+    return commands
 
 
 def text(value):
@@ -58,7 +180,7 @@ def valid_name(value):
     return value
 
 
-def capture(argv, timeout=20, empty_ok=False, accept_report=False):
+def capture(argv, timeout=20, empty_ok=False, accept_report=False, return_status=False):
     environment = dict(os.environ, LC_ALL="C")
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, env=environment, start_new_session=True)
@@ -68,9 +190,9 @@ def capture(argv, timeout=20, empty_ok=False, accept_report=False):
         os.killpg(process.pid, signal.SIGKILL)
         process.communicate()
         raise Error("Command cancelled or timed out; no result was accepted.") from None
-    if process.returncode and not (accept_report and output) and not (empty_ok and not output and not errors):
+    if process.returncode and not (accept_report and output) and not (empty_ok and process.returncode == 1 and not output and not errors):
         raise Error(text(errors) or f"{argv[0]} failed ({process.returncode}).")
-    return output
+    return (output, process.returncode) if return_status else output
 
 
 def parse_search(output, kind):
@@ -167,6 +289,8 @@ def installed_catalog():
             record["source_detail"] += " Installation origin was not recorded; repository priority breaks ties."
         else:
             foreign.append(record)
+    if not AUR_HELPER:
+        return records
     try:
         available = aur_info([record["name"] for record in foreign])
     except (Error, OSError, ValueError) as error:
@@ -190,6 +314,10 @@ def catalog(mode, query=""):
         return installed_catalog()
     if not query.strip():
         return []
+    if not AUR_HELPER:
+        return []
+    if HELPER_STYLE in ("aura", "custom"):
+        return aur_search(query, set())
     # Search is read-only. No fallback mirror or alternative package is substituted.
     output = capture([AUR_HELPER, "-Ssa", "--color", "never", "--", query], timeout=30, empty_ok=True)
     return parse_search(output, "aur")
@@ -242,7 +370,10 @@ def merged_search(database, query):
     directory = Path(database).parent
     lookup = json.loads(Path(database).read_text())
     status = "AUR: type at least 2 characters"
-    if len(query.strip()) >= 2:
+    if not AUR_HELPER:
+        lookup = {key: record for key, record in lookup.items() if record["kind"] != "aur"}
+        status = "Pacman only · AUR disabled"
+    elif len(query.strip()) >= 2:
         try:
             installed = set(json.loads((directory / "installed.json").read_text()))
             aur = aur_search(query, installed)
@@ -362,7 +493,7 @@ def picker(records, title, query="", multi=True, keys="", preview=True, searchab
         if multi:
             args += [f"--multi={MAX_BATCH}", "--bind=ctrl-a:select-all,ctrl-d:deselect-all"]
         if preview:
-            (Path(directory) / "preview-mode").write_text("details")
+            (Path(directory) / "preview-mode").write_text(PREVIEW_MODE)
             command = shlex.join(frontend_command("--preview", str(database))) + " {1}"
             size_file = Path(directory) / "preview-size"
             size_file.write_text("48")
@@ -473,7 +604,7 @@ def preview(database, identifier):
     print(text(record["name"]), flush=True)
     directory = Path(database).parent
     mode_file = directory / "preview-mode"
-    mode = mode_file.read_text() if mode_file.exists() else "details"
+    mode = mode_file.read_text() if mode_file.exists() else PREVIEW_MODE
     if mode == "details" and record.get("source_detail"):
         print(text(record["source_detail"]))
     is_aur = record["source"].casefold() == "aur" or record["kind"] == "aur"
@@ -530,7 +661,13 @@ def transaction_command(action, records):
             targets = [valid_name(record["source"]) + "/" + name for record, name in zip(records, names)]
             return ["sudo", "pacman", "-S", "--needed", "--", *targets]
         if kinds == {"aur"}:
-            return [AUR_HELPER, "-S", "--needed", "--aur", "--", *names]
+            if not AUR_HELPER:
+                raise Error("AUR is disabled. Choose a helper in Settings.")
+            if HELPER_STYLE == "aura":
+                return with_wrapper([AUR_HELPER, "-A", "--", *names])
+            if HELPER_STYLE == "custom":
+                return with_wrapper([AUR_HELPER, *HELPER_INSTALL_ARGS, *names])
+            return with_wrapper([AUR_HELPER, "-S", "--needed", "--aur", "--", *names])
         raise Error("Install one source category at a time.")
     if any(record["kind"] != "installed" for record in records):
         raise Error("Choose installed packages for this action.")
@@ -563,6 +700,8 @@ def confirm(message):
 
 def perform(action, records):
     commands = transaction_commands(action, records)
+    if action == "install" and TRAUR_ENABLED:
+        audit([record for record in records if record["kind"] == "aur"], strict=True)
     print("\n" + action.upper())
     for record in records:
         print(f"  {record['name']}   [{record['source']}]   {record['version']}")
@@ -579,24 +718,48 @@ def perform(action, records):
             raise Error(f"Package operation stopped (exit {code}). No fallback was attempted.")
 
 
-def audit(records):
+def audit(records, strict=False):
     for record in records:
         if record["kind"] != "aur" and record["source"].casefold() != "aur":
             print("\nSkipping non-AUR package:", record["name"])
             continue
         print("\nTraur:", record["name"])
         try:
-            output = capture(["traur", "scan", valid_name(record["name"]), "--json"], timeout=90, accept_report=True)
+            command = ["traur", "scan", valid_name(record["name"]), "--json"]
+            if strict:
+                output, code = capture(command, timeout=90, accept_report=True, return_status=True)
+            else:
+                output, code = capture(command, timeout=90, accept_report=True), 0
             report = json.loads(output)
             if not isinstance(report, dict) or report.get("status") != "complete" or not isinstance(report.get("tier"), str) or not isinstance(report.get("signals"), list):
                 raise Error("Incomplete or invalid Traur report.")
+            if strict and (report.get("schema_version") != 2 or report.get("package") != record["name"]
+                           or type(report.get("score")) is not int or not 0 <= report["score"] <= 100
+                           or report["tier"] not in ("Trusted", "Ok", "Sketchy", "Suspicious", "Malicious") or code not in (0, 1)):
+                raise Error("Incomplete or invalid Traur score.")
             print("Result:", text(report["tier"]), "—", text(report["status"]))
+            if type(report.get("score")) is int:
+                print("Trust score:", report["score"], "/ 100")
             for finding in report.get("signals", []):
                 if isinstance(finding, dict) and finding.get("role") not in ("Fact", "Provenance"):
                     print(" ", text(finding.get("description", "")))
         except (Error, OSError, ValueError, KeyError) as error:
             print("NO VALID AUDIT RESULT:", text(error))
-    print("\nManual report only. Build-time protection depends on your helper/makepkg setup.")
+            if strict:
+                raise Error("Traur could not complete the scan. Operation stopped.") from error
+            continue
+        if strict and (code != 0 or report["tier"] not in ("Trusted", "Ok", "Sketchy") or report.get("override_gate_fired") is not None):
+            raise Error("Traur blocked the operation: " + text(report["tier"]))
+    if records:
+        print("\nAUR report only; exact build-recipe checks require a makepkg wrapper.")
+
+
+def audit_update():
+    if not AUR_HELPER or not TRAUR_ENABLED:
+        return
+    names = [valid_name(name) for name in capture(["pacman", "-Qmq"], empty_ok=True).splitlines() if name]
+    metadata = aur_info(names) if names else {}
+    audit([{"name": name, "kind": "aur", "source": "aur"} for name in names if name in metadata], strict=True)
 
 
 def file_digest(value):
@@ -695,9 +858,10 @@ def browse(action):
         print("Loading " + mode + " packages…", flush=True)
         records = sorted(catalog(mode, query), key=source_order)
         title = {"install": "Find & install", "remove": "Installed / uninstall", "downgrade": "Downgrade (cache only)"}[action]
-        hints = "Finish selections before changing the search" if action == "install" else ""
-        selected = picker(records, title + (" — repos + AUR" if action == "install" else " — installed"),
-                          query, keys=hints, merged=action == "install", show_state=action == "install")
+        merged = action == "install" and bool(AUR_HELPER)
+        hints = "Finish selections before changing the search" if merged else ""
+        suffix = (" — repos + AUR" if merged else " — repositories") if action == "install" else " — installed"
+        selected = picker(records, title + suffix, query, keys=hints, merged=merged, show_state=action == "install")
         if selected is None:
             return
         query, key, chosen = selected
@@ -717,21 +881,123 @@ def browse(action):
             pause(title)
 
 
-def main():
+def menu_records(choices):
+    return [{"id": key, "name": name, "source": "", "description": description, "kind": "menu"}
+            for key, name, description in choices]
+
+
+def helper_menu():
+    settings = read_settings()
+    choices = menu_records([
+        ("auto", "Automatic", "Use installed paru, yay or Aura; otherwise pacman"),
+        ("pacman", "Pacman only", "Repository packages; AUR disabled"),
+        ("paru", "Paru", ""),
+        ("yay", "Yay", ""),
+        ("aura", "Aura 4+", ""),
+        ("custom", "Custom helper", "Executable and command syntax"),
+    ])
+    selected = picker(choices, "Settings — AUR helper", multi=False, preview=False, searchable=False,
+                      keys="Selected: " + text(settings["helper"]) + " · Active: " + text(AUR_HELPER or "pacman") + " · Esc back")
+    if selected is None or not selected[2]:
+        return
+    helper = selected[2][0]["id"]
+    settings["style"] = "auto"
+    if helper == "custom":
+        helper = input("Helper executable (empty = back): ").strip()
+        if not helper:
+            return
+        helper = helper_executable(helper)
+        styles = menu_records([
+            ("pacman", "Paru / yay syntax", "-S --needed --aur; -Syu"),
+            ("aura", "Aura 4+ syntax", "-A; -Syu then -Au"),
+            ("custom", "Custom arguments", "Configure install and update arguments"),
+        ])
+        selected = picker(styles, "Helper command syntax", multi=False, preview=False, searchable=False)
+        if selected is None or not selected[2]:
+            return
+        settings["style"] = selected[2][0]["id"]
+        if settings["style"] == "custom":
+            try:
+                settings["install_args"] = shlex.split(input("AUR install arguments (targets appended): "))
+                settings["update_args"] = shlex.split(input("Full system update arguments: "))
+            except ValueError as error:
+                raise Error("Invalid helper arguments: " + str(error)) from None
+    settings["helper"] = helper
+    settings["helper_enabled"] = helper != "pacman"
+    save_settings(settings)
+    activate_settings(settings)
+    clear_console()
+
+
+def settings_records(settings):
+    def toggle(key, label):
+        return (key, ("[x] " if settings[key] else "[ ] ") + label, "")
+
+    choices = [toggle("helper_enabled", "Use AUR helper")]
+    if settings["helper_enabled"]:
+        choices.append(("helper", "AUR helper settings", text(settings["helper"])))
+    choices += [toggle("traur_enabled", "Use Traur"), toggle("wrapper_enabled", "Use makepkg wrapper")]
+    if settings["wrapper_enabled"]:
+        choices.append(("wrapper_command", "Makepkg wrapper", text(settings["wrapper_command"] or "Not configured")))
+    key_status = "Environment" if os.environ.get("VT_API_KEY", "").strip() else "Configured" if VT_KEY.is_file() else "Not set"
+    choices += [("vt_key", "VirusTotal API key", key_status),
+                ("preview_mode", "Package details", "Expanded" if settings["preview_mode"] == "details" else "Compact"),
+                ("back", "Back", "")]
+    return menu_records(choices)
+
+
+def settings_menu():
+    while True:
+        settings = read_settings()
+        selected = picker(settings_records(settings), "Settings", multi=False, preview=False, searchable=False,
+                          keys="Active: " + text(AUR_HELPER or "pacman") + " · Enter change · Esc back")
+        if selected is None or not selected[2] or selected[2][0]["id"] == "back":
+            return
+        action = selected[2][0]["id"]
+        if action == "helper":
+            helper_menu()
+            continue
+        if action in ("helper_enabled", "traur_enabled", "wrapper_enabled"):
+            settings[action] = not settings[action]
+            if action == "wrapper_enabled" and settings[action] and not settings["wrapper_command"]:
+                settings["wrapper_command"] = str(HOME / ".local/bin/makepkg")
+        elif action == "wrapper_command":
+            value = input("Makepkg security wrapper executable (empty = back): ").strip()
+            if not value:
+                continue
+            settings["wrapper_command"] = helper_executable(value)
+        elif action == "vt_key":
+            key = getpass.getpass("VirusTotal API key (hidden; empty = back): ").strip()
+            if key:
+                save_vt_key(key)
+            continue
+        elif action == "preview_mode":
+            settings["preview_mode"] = "summary" if settings["preview_mode"] == "details" else "details"
+        else:
+            continue
+        save_settings(settings)
+        activate_settings(settings)
+
+
+def main_records():
     choices = [
-        ("install", "Find & install", "Repositories + AUR; alphabetical groups by source"),
+        ("install", "Find & install", "Repositories + AUR" if AUR_HELPER else "Repository packages"),
         ("remove", "Installed / uninstall", "List installed packages and select several to remove"),
         ("orphans", "Remove orphans", "Remove all unused dependencies; pacman confirms the transaction"),
         ("downgrade", "Downgrade", "Select previous versions from local caches"),
         ("vt", "VirusTotal", "Check a file/SHA-256; no upload"),
-        ("update", "Update system", f"Normal {text(AUR_HELPER)} update using your existing configuration"),
+        ("update", "Update system", text(AUR_HELPER or "pacman")),
+        ("settings", "Settings", "Helper, Traur, wrapper, VirusTotal and package details"),
         ("exit", "Exit", ""),
     ]
-    records = [{"id": key, "name": name, "source": "", "description": description, "kind": "menu"}
-               for key, name, description in choices]
+    return menu_records(choices)
+
+
+def main():
     while True:
         try:
-            selected = picker(records, "Packages", multi=False, preview=False, searchable=False)
+            selected = picker(main_records(), "Packages", multi=False, preview=False, searchable=False,
+                              keys="Helper: " + text(AUR_HELPER) if AUR_HELPER else "Pacman only · AUR disabled")
             if selected is None or not selected[2] or selected[2][0]["id"] == "exit":
                 return
             action = selected[2][0]["id"]
@@ -742,10 +1008,15 @@ def main():
             elif action == "vt":
                 if virustotal():
                     pause()
+            elif action == "settings":
+                settings_menu()
             elif action == "update":
-                code = subprocess.call(update_command())
-                if code:
-                    raise Error(f"System update stopped (exit {code}). No fallback was attempted.")
+                commands = update_commands()
+                audit_update()
+                for command in commands:
+                    code = subprocess.call(command)
+                    if code:
+                        raise Error(f"System update stopped (exit {code}). No fallback was attempted.")
                 clear_console()
         except (Error, OSError) as error:
             show_error(error)
@@ -759,16 +1030,38 @@ def run(argv):
         print("package-menu " + (HERE.parent / "VERSION").read_text().strip())
         return
     if argv in (["--help"], ["-h"]):
-        print("Usage: package-menu [--aur-helper EXECUTABLE] [--list repos|installed|aur [query]]")
-        print("Arch Linux package TUI. Default AUR helper: paru; use --aur-helper yay to change it.")
+        print("Usage: package-menu [--aur-helper EXECUTABLE|pacman] [--settings | --list repos|installed|aur [query]]")
+        print("Choose a helper in Settings. Without a helper, repository actions use pacman.")
         print("--help, -h  Show this help\n--version   Show the installed version")
         return
-    if argv[:1] == ["--aur-helper"]:
+    settings = read_settings()
+    options = {"--aur-helper": "helper", "--helper-style": "style",
+               "--helper-install-args": "install_args", "--helper-update-args": "update_args",
+               "--runtime-settings": "runtime"}
+    while argv and argv[0] in options:
+        option = argv[0]
         if len(argv) < 2:
-            raise Error("--aur-helper requires an executable.")
-        configure_helper(argv[1])
+            raise Error(option + " requires a value.")
+        key, value = options[option], argv[1]
+        if key.endswith("_args") or key == "runtime":
+            try:
+                value = json.loads(value)
+            except ValueError:
+                raise Error(option + " requires a JSON argument list.") from None
+        if key == "helper":
+            settings["style"] = "auto"
+            settings["helper_enabled"] = value != "pacman"
+        if key == "runtime":
+            if not isinstance(value, dict):
+                raise Error("Invalid runtime settings.")
+            settings.update(value)
+        else:
+            settings[key] = value
         argv = argv[2:]
-    if len(argv) == 3 and argv[0] == "--preview":
+    activate_settings(settings)
+    if argv == ["--settings"]:
+        settings_menu()
+    elif len(argv) == 3 and argv[0] == "--preview":
         preview(argv[1], argv[2])
     elif len(argv) == 3 and argv[0] == "--preview-mode":
         print(preview_mode(argv[1], argv[2]))
@@ -781,7 +1074,7 @@ def run(argv):
     elif not argv:
         main()
     else:
-        raise Error("Usage: package-menu [--aur-helper EXECUTABLE] [--list repos|installed|aur [query]]")
+        raise Error("Usage: package-menu [--aur-helper EXECUTABLE|pacman] [--settings | --list repos|installed|aur [query]]")
 
 
 def cli():
