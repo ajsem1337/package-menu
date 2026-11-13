@@ -17,9 +17,12 @@
 
 Mixed installs run repository packages before AUR. Downgrades use pacman and
 paru/yay caches. Package managers handle transaction confirmation and sudo
-authentication. Enabling Traur scans selected/installed AUR packages and displays
-their scores before installs/updates (Traur JSON schema 2). Incomplete or high-risk reports stop the
+authentication. Enabling Traur scans selected AUR installs and AUR update candidates
+(Traur JSON schema 2), not every installed AUR package. Paru/yay candidates come
+from `HELPER -Qua --color never`; Aura/custom use AUR version comparisons with
+`vercmp`. No AUR upgrades means no Traur scans. Incomplete or high-risk reports stop the
 operation. It does not inspect every build dependency or replace a build-time gate.
+Aura/custom version checks do not predict VCS rebuilds or custom helper plans.
 Custom helpers use the configured install/update argument lists. Missing helpers
 select pacman-only mode before an operation; failed operations are not retried.
 

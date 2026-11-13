@@ -336,12 +336,70 @@ class HelperSettingsTests(unittest.TestCase):
                 app.perform("install", records)
             capture.assert_not_called()
 
-    def test_update_scans_installed_aur_packages_before_starting_update(self):
+    def test_update_scans_only_aur_upgrade_candidates_before_starting_update(self):
         app.TRAUR_ENABLED = True
-        with patch.object(app, "capture", side_effect=["example\n", (self.scan_result(), 0)]) as capture, patch.object(app, "aur_info", return_value={"example": {}}), patch.object(app, "picker", side_effect=[selected("update"), None]), patch.object(app.subprocess, "call", return_value=0) as transaction, contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(app, "capture", side_effect=["example 1 -> 2\n", (self.scan_result(), 0)]) as capture, patch.object(app, "picker", side_effect=[selected("update"), None]), patch.object(app.subprocess, "call", return_value=0) as transaction, contextlib.redirect_stdout(io.StringIO()):
             app.main()
-        capture.assert_any_call(["pacman", "-Qmq"], empty_ok=True)
+        capture.assert_any_call(["paru", "-Qua", "--color", "never"], timeout=60, empty_ok=True)
         transaction.assert_called_once_with(["paru", "-Syu"])
+
+    def test_repository_only_update_has_no_traur_scans_or_audit_banner(self):
+        app.TRAUR_ENABLED = True
+        with patch.object(app, "capture", return_value="") as capture, patch.object(app, "audit") as audit, patch.object(app, "aur_info") as info, patch.object(app, "picker", side_effect=[selected("update"), None]), patch.object(app.subprocess, "call", return_value=0) as transaction, contextlib.redirect_stdout(io.StringIO()) as output:
+            app.main()
+        capture.assert_called_once_with(["paru", "-Qua", "--color", "never"], timeout=60, empty_ok=True)
+        audit.assert_not_called()
+        info.assert_not_called()
+        self.assertNotIn("Traur:", output.getvalue())
+        self.assertNotIn("AUR report", output.getvalue())
+        transaction.assert_called_once_with(["paru", "-Syu"])
+
+    def test_paru_and_yay_update_queries_skip_ignored_packages_and_deduplicate(self):
+        output = "update-me 1 -> 2\nignored 1 -> 2 [ignored]\nupdate-me 1 -> 2\nvcs-git 1 -> latest-commit\n"
+        for helper in ("paru", "yay"):
+            app.configure_helper(helper)
+            with self.subTest(helper=helper), patch.object(app, "capture", return_value=output) as capture:
+                self.assertEqual(app.aur_update_names(), ["update-me", "vcs-git"])
+            capture.assert_called_once_with([helper, "-Qua", "--color", "never"], timeout=60, empty_ok=True)
+
+    def test_update_query_failure_stops_without_scanning_everything_or_running_update(self):
+        app.TRAUR_ENABLED = True
+        for result in (app.Error("query failed"), "unrecognized query output\n", "--noconfirm 1 -> 2\n"):
+            parameters = {"side_effect": result} if isinstance(result, Exception) else {"return_value": result}
+            with self.subTest(result=result), patch.object(app, "capture", **parameters), patch.object(app, "audit") as audit, patch.object(app.subprocess, "call") as transaction, patch.object(app, "picker", side_effect=[selected("update"), None]), patch.object(app, "pause") as pause, contextlib.redirect_stdout(io.StringIO()):
+                app.main()
+            audit.assert_not_called()
+            transaction.assert_not_called()
+            pause.assert_called_once_with()
+
+    def test_aura_and_custom_compare_versions_not_all_installed_aur_packages(self):
+        installed = "same 1.0-1\nnewer-local 2.0-1\nupdate-me 1:1.0-1\nlocal-only 1\n"
+        metadata = {"same": {"Version": "1.0-1"}, "newer-local": {"Version": "1.0-1"},
+                    "update-me": {"Version": "1:2.0-1"}}
+        for style in ("aura", "custom"):
+            app.configure_helper("helper", style)
+            with self.subTest(style=style), patch.object(app, "capture", side_effect=[installed, "0\n", "-1\n", "1\n"]) as capture, patch.object(app, "aur_info", return_value=metadata):
+                self.assertEqual(app.aur_update_names(), ["update-me"])
+            self.assertEqual(capture.call_args_list, [call(["pacman", "-Qm"], empty_ok=True),
+                             call(["vercmp", "1.0-1", "1.0-1"]), call(["vercmp", "1.0-1", "2.0-1"]),
+                             call(["vercmp", "1:2.0-1", "1:1.0-1"])])
+
+    def test_no_foreign_packages_or_no_newer_aur_versions_produces_no_scan(self):
+        app.configure_helper("aura")
+        app.TRAUR_ENABLED = True
+        for queries, metadata in (([""], {}), (["example 1.0\n", "0\n"], {"example": {"Version": "1.0"}})):
+            with self.subTest(queries=queries), patch.object(app, "capture", side_effect=queries), patch.object(app, "aur_info", return_value=metadata), patch.object(app, "audit") as audit:
+                app.audit_update()
+            audit.assert_not_called()
+
+    def test_native_and_disabled_traur_modes_do_not_query_aur_updates(self):
+        for helper, enabled in (("pacman", True), ("paru", False)):
+            app.configure_helper(helper)
+            app.TRAUR_ENABLED = enabled
+            with self.subTest(helper=helper), patch.object(app, "capture") as capture, patch.object(app, "audit") as audit:
+                app.audit_update()
+            capture.assert_not_called()
+            audit.assert_not_called()
 
     def test_runtime_callbacks_keep_scan_wrapper_and_preview_preferences(self):
         app.TRAUR_ENABLED, app.WRAPPER_ENABLED = True, True

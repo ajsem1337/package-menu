@@ -754,12 +754,54 @@ def audit(records, strict=False):
         print("\nAUR report only; exact build-recipe checks require a makepkg wrapper.")
 
 
+def aur_update_names():
+    if HELPER_STYLE == "pacman":
+        # Paru/yay expose a read-only AUR upgrade query, including devel checks.
+        # Keep versioned output so ignored packages remain identifiable.
+        output = capture([AUR_HELPER, "-Qua", "--color", "never"], timeout=60, empty_ok=True)
+        names = []
+        for line in output.splitlines():
+            fields = line.split()
+            if not fields:
+                continue
+            if len(fields) not in (4, 5) or fields[2] != "->" or (len(fields) == 5 and fields[4] != "[ignored]"):
+                raise Error("Could not read the helper's AUR update list.")
+            name = valid_name(fields[0])
+            if len(fields) == 4:
+                names.append(name)
+        return list(dict.fromkeys(names))
+
+    # Aura/custom helpers do not share Paru/yay's query syntax. Compare AUR
+    # versions without running their update command or treating every foreign
+    # package as an upgrade. vercmp handles Arch epochs and package releases.
+    installed = {}
+    for line in capture(["pacman", "-Qm"], empty_ok=True).splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            raise Error("Could not read installed foreign package versions.")
+        installed[valid_name(fields[0])] = fields[1]
+    metadata = aur_info(list(installed)) if installed else {}
+    names = []
+    for name, version in installed.items():
+        if name not in metadata:
+            continue
+        remote = metadata[name].get("Version")
+        if not isinstance(remote, str) or not remote or any(character.isspace() for character in remote):
+            raise Error("Invalid AUR update version.")
+        comparison = capture(["vercmp", remote, version]).strip()
+        if not re.fullmatch(r"-?\d+", comparison):
+            raise Error("Could not compare AUR package versions.")
+        if int(comparison) > 0:
+            names.append(name)
+    return names
+
+
 def audit_update():
     if not AUR_HELPER or not TRAUR_ENABLED:
         return
-    names = [valid_name(name) for name in capture(["pacman", "-Qmq"], empty_ok=True).splitlines() if name]
-    metadata = aur_info(names) if names else {}
-    audit([{"name": name, "kind": "aur", "source": "aur"} for name in names if name in metadata], strict=True)
+    names = aur_update_names()
+    if names:
+        audit([{"name": name, "kind": "aur", "source": "aur"} for name in names], strict=True)
 
 
 def file_digest(value):
