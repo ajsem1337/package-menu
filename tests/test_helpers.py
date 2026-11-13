@@ -32,7 +32,7 @@ class HelperSettingsTests(unittest.TestCase):
                            ("HELPER_INSTALL_ARGS", ["-S", "--needed", "--aur", "--"]),
                            ("HELPER_UPDATE_ARGS", ["-Syu"]),
                            ("TRAUR_ENABLED", False), ("WRAPPER_ENABLED", False),
-                           ("WRAPPER_COMMAND", ""), ("PREVIEW_MODE", "details"),
+                           ("PREVIEW_MODE", "details"),
                            ("LAST_SKIPPED", []),
                            ("CONFIG_FILE", self.directory / "settings/config.json")):
             mocked = patch.object(app, key, value)
@@ -233,7 +233,7 @@ class HelperSettingsTests(unittest.TestCase):
         settings["helper_enabled"] = True
         self.assertEqual([record["id"] for record in app.settings_records(settings)][:2], ["helper_enabled", "helper"])
         settings["wrapper_enabled"] = True
-        self.assertIn("wrapper_command", [record["id"] for record in app.settings_records(settings)])
+        self.assertNotIn("wrapper_command", [record["id"] for record in app.settings_records(settings)])
 
     def test_disabling_helper_preserves_choice_and_reenabling_uses_it(self):
         settings = app.read_settings()
@@ -281,21 +281,34 @@ class HelperSettingsTests(unittest.TestCase):
         self.assertEqual(path.read_text(), "old-key")
 
     def test_wrapper_uses_explicit_makepkg_option_for_paru_and_yay(self):
-        wrapper = str(self.directory / "makepkg guard")
-        app.WRAPPER_ENABLED, app.WRAPPER_COMMAND = True, wrapper
+        wrapper = str(app.BUNDLED_WRAPPER)
+        app.WRAPPER_ENABLED = True
         for helper in ("paru", "yay"):
             app.configure_helper(helper)
-            with self.subTest(helper=helper), patch.object(app.shutil, "which", return_value=wrapper):
+            with self.subTest(helper=helper):
                 self.assertEqual(app.transaction_command("install", [package()]),
                                  [helper, "--makepkg", wrapper, "-S", "--needed", "--aur", "--", "example"])
                 self.assertEqual(app.update_commands(), [[helper, "-Syu", "--repo"], [helper, "--makepkg", wrapper, "-Sua"]])
 
-    def test_wrapper_missing_or_plain_makepkg_blocks_before_transactions(self):
-        app.WRAPPER_ENABLED, app.WRAPPER_COMMAND = True, "guard"
-        for executable in (None, "/usr/bin/makepkg"):
-            with self.subTest(executable=executable), patch.object(app.shutil, "which", return_value=executable), patch.object(app.subprocess, "call") as transaction, self.assertRaises(app.Error):
-                app.perform("install", [package()])
-            transaction.assert_not_called()
+    def test_missing_bundled_wrapper_blocks_before_transactions(self):
+        app.WRAPPER_ENABLED = True
+        with patch.object(app, "BUNDLED_WRAPPER", self.directory / "missing"), patch.object(app.subprocess, "call") as transaction, self.assertRaises(app.Error):
+            app.perform("install", [package()])
+        transaction.assert_not_called()
+
+    def test_disabled_wrapper_does_not_override_makepkg_or_need_guard_files(self):
+        with patch.object(app, "BUNDLED_WRAPPER", self.directory / "missing"):
+            self.assertEqual(app.transaction_command("install", [package()]),
+                             ["paru", "-S", "--needed", "--aur", "--", "example"])
+
+    def test_legacy_external_wrapper_path_is_ignored_and_removed_on_save(self):
+        app.CONFIG_FILE.parent.mkdir(parents=True)
+        app.CONFIG_FILE.write_text(json.dumps({"wrapper_enabled": True, "wrapper_command": "/old/local/wrapper"}))
+        settings = app.read_settings()
+        self.assertNotIn("wrapper_command", settings)
+        self.assertTrue(settings["wrapper_enabled"])
+        app.save_settings(settings)
+        self.assertNotIn("wrapper_command", json.loads(app.CONFIG_FILE.read_text()))
 
     def test_unsupported_wrapper_helper_is_not_silently_unprotected(self):
         app.WRAPPER_ENABLED = True
@@ -408,13 +421,13 @@ class HelperSettingsTests(unittest.TestCase):
 
     def test_runtime_callbacks_keep_scan_wrapper_and_preview_preferences(self):
         app.TRAUR_ENABLED, app.WRAPPER_ENABLED = True, True
-        app.WRAPPER_COMMAND, app.PREVIEW_MODE = "/opt/makepkg guard", "summary"
+        app.PREVIEW_MODE = "summary"
         command = app.frontend_command()
         with patch.object(app.shutil, "which", return_value="/bin/paru"), patch.object(app, "main"):
             app.run(command[3:])
         self.assertTrue(app.TRAUR_ENABLED)
         self.assertTrue(app.WRAPPER_ENABLED)
-        self.assertEqual(app.WRAPPER_COMMAND, "/opt/makepkg guard")
+        self.assertNotIn("wrapper_command", app.frontend_command()[-1])
         self.assertEqual(app.PREVIEW_MODE, "summary")
 
     def test_compact_preference_initializes_package_preview(self):
@@ -446,7 +459,7 @@ class HelperSettingsTests(unittest.TestCase):
 
     def test_invalid_option_types_and_modes_are_rejected_before_saving(self):
         for key, value in (("helper_enabled", "true"), ("traur_enabled", 1), ("wrapper_enabled", []),
-                           ("preview_mode", "anything"), ("wrapper_command", None)):
+                           ("preview_mode", "anything")):
             settings = app.read_settings()
             settings[key] = value
             with self.subTest(key=key), self.assertRaises(app.Error):

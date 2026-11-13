@@ -24,6 +24,13 @@ class InstallTests(unittest.TestCase):
             self.assertTrue((prefix / "share/licenses/package-menu/LICENSE-OMARCHY").is_file())
             wrapper = command.read_text()
             self.assertNotIn("plugins/materialized", wrapper)
+            guard_wrapper = prefix / "share/package-menu/makepkg-wrapper"
+            self.assertTrue(guard_wrapper.is_file())
+            self.assertTrue((guard_wrapper.parent / "guard.py").is_file())
+            result = subprocess.run([str(guard_wrapper), "--package-menu-wrapper-version"], check=True,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.stdout.strip(), "package-menu wrapper " + (ROOT / "VERSION").read_text().strip())
+            self.assertFalse((prefix / "bin/makepkg").exists())
 
     def test_destdir_staging_does_not_embed_the_build_directory(self):
         with tempfile.TemporaryDirectory() as directory:

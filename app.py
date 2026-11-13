@@ -32,7 +32,7 @@ HELPER_INSTALL_ARGS = ["-S", "--needed", "--aur", "--"]
 HELPER_UPDATE_ARGS = ["-Syu"]
 TRAUR_ENABLED = False
 WRAPPER_ENABLED = False
-WRAPPER_COMMAND = ""
+BUNDLED_WRAPPER = HERE.parent / "makepkg-wrapper"
 PREVIEW_MODE = "details"
 LAST_SKIPPED = []
 
@@ -75,7 +75,7 @@ def configure_helper(value, style="auto", install_args=None, update_args=None):
 def read_settings():
     settings = {"helper_enabled": False, "helper": "paru", "style": "auto",
                 "install_args": ["-S", "--needed", "--aur", "--"], "update_args": ["-Syu"],
-                "traur_enabled": False, "wrapper_enabled": False, "wrapper_command": "", "preview_mode": "details"}
+                "traur_enabled": False, "wrapper_enabled": False, "preview_mode": "details"}
     if CONFIG_FILE.exists():
         try:
             saved = json.loads(CONFIG_FILE.read_text())
@@ -84,6 +84,7 @@ def read_settings():
         if not isinstance(saved, dict):
             raise Error(f"Invalid settings file: {CONFIG_FILE}")
         settings.update(saved)
+    settings.pop("wrapper_command", None)  # Legacy external-wrapper setting.
     validate_settings(settings)
     return settings
 
@@ -99,12 +100,10 @@ def validate_settings(settings):
     helper_arguments(settings.get("update_args"))
     if settings.get("preview_mode") not in ("details", "summary"):
         raise Error("Unknown package details mode.")
-    if settings.get("wrapper_command") != "":
-        helper_executable(settings.get("wrapper_command"))
 
 
 def activate_settings(settings):
-    global TRAUR_ENABLED, WRAPPER_ENABLED, WRAPPER_COMMAND, PREVIEW_MODE
+    global TRAUR_ENABLED, WRAPPER_ENABLED, PREVIEW_MODE
     validate_settings(settings)
     helper = helper_executable(settings["helper"]) if settings["helper_enabled"] else "pacman"
     if helper == "auto":
@@ -113,7 +112,7 @@ def activate_settings(settings):
         helper = "pacman"
     configure_helper(helper, settings["style"], settings["install_args"], settings["update_args"])
     TRAUR_ENABLED = settings["traur_enabled"]
-    WRAPPER_ENABLED, WRAPPER_COMMAND = settings["wrapper_enabled"], settings["wrapper_command"]
+    WRAPPER_ENABLED = settings["wrapper_enabled"]
     PREVIEW_MODE = settings["preview_mode"]
 
 
@@ -141,7 +140,7 @@ def frontend_command(*args):
                     "--helper-update-args", json.dumps(HELPER_UPDATE_ARGS)]
     command += ["--runtime-settings", json.dumps({"helper_enabled": bool(AUR_HELPER),
                 "traur_enabled": TRAUR_ENABLED, "wrapper_enabled": WRAPPER_ENABLED,
-                "wrapper_command": WRAPPER_COMMAND, "preview_mode": PREVIEW_MODE})]
+                "preview_mode": PREVIEW_MODE})]
     return [*command, *args]
 
 
@@ -150,10 +149,9 @@ def with_wrapper(command):
         return command
     if HELPER_STYLE != "pacman":
         raise Error("The makepkg wrapper requires Paru/yay command syntax; this helper is not supported.")
-    wrapper = shutil.which(str(Path(WRAPPER_COMMAND).expanduser())) if WRAPPER_COMMAND else None
-    if not wrapper or Path(wrapper).resolve() == Path("/usr/bin/makepkg").resolve():
-        raise Error("Choose an executable makepkg security wrapper in Settings, not the system makepkg.")
-    return [command[0], "--makepkg", str(Path(wrapper).absolute()), *command[1:]]
+    if not BUNDLED_WRAPPER.is_file() or not os.access(BUNDLED_WRAPPER, os.X_OK) or not (HERE.parent / "guard.py").is_file():
+        raise Error("The bundled makepkg wrapper is missing. Reinstall package-menu.")
+    return [command[0], "--makepkg", str(BUNDLED_WRAPPER), *command[1:]]
 
 
 def update_command():
@@ -1093,8 +1091,6 @@ def settings_records(settings):
     if settings["helper_enabled"]:
         choices.append(("helper", "AUR helper settings", text(settings["helper"])))
     choices += [toggle("traur_enabled", "Use Traur"), toggle("wrapper_enabled", "Use makepkg wrapper")]
-    if settings["wrapper_enabled"]:
-        choices.append(("wrapper_command", "Makepkg wrapper", text(settings["wrapper_command"] or "Not configured")))
     key_status = "Environment" if os.environ.get("VT_API_KEY", "").strip() else "Configured" if VT_KEY.is_file() else "Not set"
     choices += [("vt_key", "VirusTotal API key", key_status),
                 ("preview_mode", "Package details", "Expanded" if settings["preview_mode"] == "details" else "Compact"),
@@ -1115,13 +1111,6 @@ def settings_menu():
             continue
         if action in ("helper_enabled", "traur_enabled", "wrapper_enabled"):
             settings[action] = not settings[action]
-            if action == "wrapper_enabled" and settings[action] and not settings["wrapper_command"]:
-                settings["wrapper_command"] = str(HOME / ".local/bin/makepkg")
-        elif action == "wrapper_command":
-            value = input("Makepkg security wrapper executable (empty = back): ").strip()
-            if not value:
-                continue
-            settings["wrapper_command"] = helper_executable(value)
         elif action == "vt_key":
             key = getpass.getpass("VirusTotal API key (hidden; empty = back): ").strip()
             if key:

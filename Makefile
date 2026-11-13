@@ -6,6 +6,8 @@ PYTHON ?= python3
 
 install:
 	install -Dm644 app.py "$(DESTDIR)$(PREFIX)/share/package-menu/app.py"
+	install -Dm644 guard.py "$(DESTDIR)$(PREFIX)/share/package-menu/guard.py"
+	install -Dm755 makepkg-wrapper "$(DESTDIR)$(PREFIX)/share/package-menu/makepkg-wrapper"
 	install -Dm644 VERSION "$(DESTDIR)$(PREFIX)/share/package-menu/VERSION"
 	install -Dm644 LICENSE "$(DESTDIR)$(PREFIX)/share/licenses/package-menu/LICENSE"
 	install -Dm644 LICENSE-OMARCHY "$(DESTDIR)$(PREFIX)/share/licenses/package-menu/LICENSE-OMARCHY"

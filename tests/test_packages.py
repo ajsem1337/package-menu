@@ -42,7 +42,7 @@ class PackageMenuTests(unittest.TestCase):
                            ("HELPER_INSTALL_ARGS", ["-S", "--needed", "--aur", "--"]),
                            ("HELPER_UPDATE_ARGS", ["-Syu"]),
                            ("TRAUR_ENABLED", False), ("WRAPPER_ENABLED", False),
-                           ("WRAPPER_COMMAND", ""), ("PREVIEW_MODE", "details"),
+                           ("PREVIEW_MODE", "details"),
                            ("LAST_SKIPPED", []),
                            ("CONFIG_FILE", Path(directory.name) / "config.json")):
             mocked = patch.object(app, key, value)

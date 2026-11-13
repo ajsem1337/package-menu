@@ -27,13 +27,15 @@ Pacman is the default. **Settings** provides:
 
 - **Use AUR helper**, with a choice of paru, yay, Aura 4+ or custom commands.
 - **Use Traur** to show trust scores before AUR installs/updates.
-- **Use makepkg wrapper** for additional build-time checks (Paru/yay syntax).
+- **Use makepkg wrapper** enables the bundled build-time guard (Paru/yay syntax).
 - **VirusTotal API key**, entered privately.
 - **Package details:** expanded or compact.
 
 Suspicious AUR targets are skipped while unrelated packages continue. Review them
 under **Skipped packages**; installing anyway requires typing the package name.
 This grants one-operation approval, not a permanent whitelist entry.
+The wrapper runs only through package-menu when enabled; it does not replace
+the system `makepkg` or change global helper configuration.
 
 Settings are saved in `~/.config/package-menu/config.json` (`XDG_CONFIG_HOME`
 is respected). Without an available helper, AUR is disabled.

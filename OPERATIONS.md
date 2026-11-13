@@ -35,20 +35,17 @@ select pacman-only mode before an operation. Generic custom full-update commands
 retain their native behavior; select Paru/yay or Aura syntax for managed per-target updates.
 Ordinary helper failures and cancellations stop the operation, without retries.
 
-The optional wrapper passes the configured executable through Paru/yay's
-`--makepkg` option. Aura/custom command syntax is rejected when that option is
-enabled, rather than silently running unprotected. The wrapper must be installed
-separately. Existing system/helper gates are never modified or disabled by the TUI.
+The optional bundled `makepkg-wrapper` is passed through Paru/yay's `--makepkg`
+option only when enabled in Settings. It uses `traur` on PATH and delegates to
+`/usr/bin/makepkg`. Nothing is installed as a global `makepkg` replacement, and
+package-menu does not edit helper configuration. Aura/custom command syntax is
+rejected with this option enabled, rather than silently running unprotected.
 
-Compatible wrappers append JSON-lines deny events to `PACKAGE_MENU_GATE_EVENT`:
-`{"version":1,"blocked":true,"reason":"...","approval_key":"optional SHA-256"}`.
-Unknown failures without a valid event are not treated as safely skipped packages.
-The local guard emits approval keys bound to the recipe directory, input fingerprint
-and report. **Skipped packages** requires typing the target name before passing
-selected keys in a private `PACKAGE_MENU_GATE_APPROVAL` JSON file for one helper call.
-Changed inputs/reports are denied again. Neither this file nor the deny-event file
-survives the call; no whitelist or persistent IgnorePkg entry is written. Other
-wrappers need the same protocol to support this scoped override.
+Private temporary deny events let the TUI distinguish a blocked recipe from an
+ordinary helper failure. **Skipped packages** requires typing the target name
+before granting one-operation approval bound to the recipe bytes and report.
+Changed inputs/reports are denied again. Event/approval files are removed after
+the helper call; no whitelist or persistent IgnorePkg entry is written.
 
 ## Network and files
 
@@ -60,6 +57,9 @@ wrappers need the same protocol to support this scoped override.
 - The optional key is stored in `~/.config/package-menu/virustotal.key` (0600).
 - Helper settings are stored in `$XDG_CONFIG_HOME/package-menu/config.json`,
   defaulting to `~/.config/package-menu/config.json`.
+- Guard reports, display state and provenance cache use
+  `$XDG_STATE_HOME/package-menu/guard` (default `~/.local/state/package-menu/guard`).
+  Its isolated scanner configuration ignores the caller's allow/ignore settings.
 - Preview/selector caches use private temporary files, removed on exit.
 - Fzf theme settings are read as data. Returning from an action clears terminal
   output/scrollback; external tools keep their own logs.
