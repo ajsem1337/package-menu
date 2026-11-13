@@ -1,59 +1,33 @@
 # Operations and privacy
 
-## Baseline system commands
-
-The application uses the standard Arch system commands: `pacman`
-queries package metadata and handles transactions, `pacman-conf` reads cache
-configuration, `sudo` authorizes confirmed package changes, and `cat` displays
-selector search status. Extra tools are listed in the README requirements.
-
-## Package actions
+## Commands
 
 | Action | Command |
 | --- | --- |
 | Repository install | `sudo pacman -S --needed -- repo/package ...` |
 | AUR install | `HELPER -S --needed --aur -- package ...` |
 | Remove | `sudo pacman -Rns -- package ...` |
-| List orphaned dependencies | `pacman -Qdtq` |
-| Remove all orphans (no submenu) | `sudo pacman -Rns -- package ...` with all `pacman -Qdtq` results |
+| Orphan cleanup | `pacman -Qdtq`, then `sudo pacman -Rns --` with the results |
 | Update | `HELPER -Syu` |
 | Downgrade | `sudo downgrade --cached-only --ignore=never ...` |
+| AUR report | `traur scan NAME --json` |
 
-Mixed installs run repositories first, then AUR; failure stops the next command,
-without rollback. Duplicate package names are rejected. Downgrade retains pacman
-caches plus standard paru/yay caches, not archives or custom-helper cache discovery.
-Selecting a package action delegates to the package manager without a duplicate
-yes/no prompt; sudo authentication and the manager's own transaction confirmation
-are unchanged. Successful operations return to the same refreshed catalog and
-query, not the main menu. Non-zero exits are reported and wait for Enter before
-restoring that list; no automatic retry or fallback is performed.
-Update and orphan cleanup start and return at the main menu. Orphan cleanup
-skips removal when the query is empty and retains pacman's own confirmation.
-This is a standalone terminal application, independent of Noctalia. No services,
-system settings or scanner configuration are installed or changed.
-
-Alt+T runs `traur scan NAME --json` for AUR selections. It is a manual report,
-not the makepkg wrapper or an installation gate. Existing helper/makepkg gates
-are preserved, not detected or guaranteed. Traur is a heuristic, not a sandbox.
+Mixed installs run repository packages before AUR. Downgrades use pacman and
+paru/yay caches. Package managers handle transaction confirmation and sudo
+authentication. Traur reports are manual; existing helper/makepkg gates are unchanged.
 
 ## Network and files
 
-- AUR: `aur.archlinux.org/rpc/v5/` for name search, preview metadata and exact
-  installed-source lookup (up to 100 names per request). Source fallback prefers
-  recorded provenance, then local sync repositories (exact version first;
-  repository priority breaks ties), then AUR. Offline/unmatched names stay unknown.
-- Alt+B retrieves the current PKGBUILD from AUR cgit, as text only. It is never
-  sourced or executed; it is not a claim about a cached/local build's exact recipe.
-- Preview metadata/recipes and selector state are cached only in private temporary
-  files under `XDG_RUNTIME_DIR` or Python's temporary directory, cleaned on exit.
-- Explicit Traur reports and package operations use their tools' normal upstreams.
-- VirusTotal receives a locally computed SHA-256 and API key for an existing-report
-  GET (`www.virustotal.com/api/v3/files/`); files are never uploaded. Unknown/stale
-  reports and zero detections are not safety guarantees. Optional keys are stored
-  at `~/.config/package-menu/virustotal.key` with mode 0600, never in arguments.
-- Fzf theme color declarations are read, never executed. Acknowledging an action
-  clears that terminal's screen/scrollback. External tools retain their own logs.
+- AUR RPC supplies search results and metadata. PKGBUILD previews use AUR cgit;
+  previews are displayed as text, not executed.
+- Package managers and Traur use their normal upstreams.
+- VirusTotal receives a SHA-256 and API key to retrieve an existing report.
+  Files are never uploaded. Missing reports or zero detections do not prove safety.
+- The optional key is stored in `~/.config/package-menu/virustotal.key` (0600).
+- Preview/selector caches use private temporary files, removed on exit.
+- Fzf theme settings are read as data. Returning from an action clears terminal
+  output/scrollback; external tools keep their own logs.
 
-Python invokes fzf, its own callbacks, cat and the selected tools. Transactions
-use direct argument arrays; fzf callback commands use shell-escaped arguments.
-No task manager, Noctalia panel or system-information collector is bundled here.
+Python starts fzf, its preview/search callbacks, `cat`, package queries and the
+commands above. Transactions use argument arrays; fzf callbacks use shell-escaped
+arguments. `pacman-conf` supplies cache directories.
