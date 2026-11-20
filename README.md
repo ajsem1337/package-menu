@@ -15,7 +15,17 @@ cd package-menu
 make install PREFIX="$HOME/.local"
 ```
 
-Add `~/.local/bin` to PATH. To update, pull the repository and run `make install` again.
+Add `~/.local/bin` to PATH.
+For a pacman-managed system installation, build the included package instead:
+
+```sh
+makepkg -si
+```
+
+**Update package-menu** installs the latest GitHub `main` code after confirmation
+and restarts the app. It supports `make install` installations, not pacman-owned
+files. To update a locally built pacman package, pull the checkout and run
+`makepkg -si` again. A plain `pacman -Syu` cannot update it without a package repository.
 
 ## Usage
 
@@ -52,12 +62,17 @@ is respected). Without an available helper, AUR is disabled.
 | --- | --- |
 | Enter / Esc | Confirm / back |
 | Tab / Shift+Tab | Select / unselect packages |
-| Ctrl+A / Ctrl+D | Select matches / clear selection |
+| Ctrl+A | Update system in the main menu / select all matches in package lists |
+| Ctrl+D | Clear package selection |
+| Ctrl+O | Open Settings |
 | Alt+P / Alt+D | Toggle preview / full details |
 | Alt+B | View AUR PKGBUILD |
 | Alt+T | Traur report |
-| Shift+Left/Right | Resize preview |
+| Shift+Left/Right | Resize the package split view |
 | Shift+Up/Down | Scroll preview |
+
+The right-hand pane holds shortcuts and status messages. Package lists also show
+package details there.
 
 VirusTotal can prompt for an API key, saved in `~/.config/package-menu/virustotal.key`
 with permissions `0600`. `VT_API_KEY` overrides it. Files are never uploaded.

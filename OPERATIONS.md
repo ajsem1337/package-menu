@@ -52,6 +52,10 @@ the helper call; no whitelist or persistent IgnorePkg entry is written.
 - AUR RPC supplies search results and metadata. PKGBUILD previews use AUR cgit;
   previews are displayed as text, not executed.
 - Package managers and Traur use their normal upstreams.
+- **Update package-menu** downloads the latest `main` source archive from GitHub
+  over HTTPS. After confirmation, it replaces installed application files and
+  restarts the app. Configuration and state are untouched. Pacman-owned files
+  are refused; failed replacements restore the previous files when possible.
 - VirusTotal receives a SHA-256 and API key to retrieve an existing report.
   Files are never uploaded. Missing reports or zero detections do not prove safety.
 - The optional key is stored in `~/.config/package-menu/virustotal.key` (0600).
@@ -61,9 +65,12 @@ the helper call; no whitelist or persistent IgnorePkg entry is written.
   `$XDG_STATE_HOME/package-menu/guard` (default `~/.local/state/package-menu/guard`).
   Its isolated scanner configuration ignores the caller's allow/ignore settings.
 - Preview/selector caches use private temporary files, removed on exit.
-- Fzf theme settings are read as data. Returning from an action clears terminal
-  output/scrollback; external tools keep their own logs.
+- Fzf theme settings are read as data. Shortcuts and status appear in the right
+  pane, not above the list.
+- AUR installs/updates with Traur or the wrapper pause after completion to keep
+  reports readable. Returning to the menu clears terminal output/scrollback;
+  external tools keep their own logs.
 
-Python starts fzf, its preview/search callbacks, `cat`, package queries and the
+Python starts fzf, its preview/search callbacks, package queries and the
 commands above. Transactions use argument arrays; fzf callbacks use shell-escaped
 arguments. `pacman-conf` supplies cache directories.

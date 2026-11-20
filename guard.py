@@ -251,6 +251,8 @@ def run_scan(directory, scanner=SCANNER, timeout=45, package=None):
     if not scanner.is_file() or not os.access(scanner, os.X_OK):
         raise Blocked("Traur is unavailable; nothing was checked.")
     arguments = [package] if package else ["--dir", str(directory)]
+    target = "AUR package " + safe_text(package) if package else "build recipe " + safe_text(directory)
+    print(f"[AUR protection] Scanning {target} with Traur...", file=sys.stderr, flush=True)
     process = subprocess.Popen(
         [str(scanner), "scan", *arguments, "--json", "--show-report"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -258,9 +260,14 @@ def run_scan(directory, scanner=SCANNER, timeout=45, package=None):
     )
     try:
         stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         process.communicate()
+        if isinstance(error, KeyboardInterrupt):
+            raise
         raise Blocked("Traur timed out; nothing has been approved.") from None
     try:
         result = json.loads(stdout)
@@ -270,6 +277,9 @@ def run_scan(directory, scanner=SCANNER, timeout=45, package=None):
     if not isinstance(result, dict) or result.get("schema_version") != 2:
         print_scanner_report(stderr)
         raise Blocked("Unrecognized Traur report format.")
+    if package is not None and result.get("package") != package:
+        print_scanner_report(stderr)
+        raise Blocked("Traur returned a report for a different AUR package.")
     allowed = verdict_allowed(result, process.returncode)
     if show_report_once(directory, result, allowed, "aur" if package else "local"):
         print_scanner_report(stderr)
@@ -374,8 +384,7 @@ def gate(directory, scanner=SCANNER, reports=REPORTS):
         if result.get("reason"):
             print(f"  {safe_text(result['reason'])}", file=sys.stderr)
         raise Blocked(f"Build stopped. Report: {report}\nReview this package before an explicit one-operation override.", approval_key=key)
-    # Successful native reports are deduplicated for display only. No repetitive
-    # pass/checking lines; stdout remains reserved for makepkg metadata.
+    # Only report display is deduplicated; every local scan still runs.
 
 
 def main(argv=None):
@@ -393,6 +402,9 @@ def main(argv=None):
             if name in {"BUILDFILE", "CHDIR", "BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH"} or name.startswith("BASH_FUNC_"):
                 environment.pop(name)
         os.execve(REAL_MAKEPKG, [REAL_MAKEPKG, *argv], environment)
+    except KeyboardInterrupt:
+        print("\n[AUR protection] Scan cancelled.", file=sys.stderr)
+        return 130
     except (Blocked, OSError, ValueError, UnicodeError, subprocess.SubprocessError) as error:
         report_block(error)
         for index, line in enumerate(str(error).splitlines()[:8]):

@@ -355,11 +355,12 @@ class HelperSettingsTests(unittest.TestCase):
 
     def test_update_scans_only_aur_upgrade_candidates_before_starting_update(self):
         app.TRAUR_ENABLED = True
-        with patch.object(app, "capture", side_effect=["example 1 -> 2\n", (self.scan_result(), 0)]) as capture, patch.object(app, "picker", side_effect=[selected("update"), None]), patch.object(app.subprocess, "call", return_value=0) as transaction, contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(app, "capture", side_effect=["example 1 -> 2\n", (self.scan_result(), 0)]) as capture, patch.object(app, "picker", side_effect=[selected("update"), None]), patch.object(app.subprocess, "call", return_value=0) as transaction, patch.object(app, "pause") as pause, contextlib.redirect_stdout(io.StringIO()):
             app.main()
         capture.assert_any_call(["paru", "-Qua", "--color", "never"], timeout=60, empty_ok=True)
         self.assertEqual([item.args[0] for item in transaction.call_args_list],
-                         [["paru", "-Syu", "--repo"], ["paru", "-S", "--aur", "--", "example"]])
+                          [["paru", "-Syu", "--repo"], ["paru", "-S", "--aur", "--", "example"]])
+        pause.assert_called_once_with("Packages")
 
     def test_repository_only_update_has_no_traur_scans_or_audit_banner(self):
         app.TRAUR_ENABLED = True

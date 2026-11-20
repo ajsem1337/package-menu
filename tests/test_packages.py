@@ -28,9 +28,9 @@ def preview_catalog(record, mode="summary"):
         yield database
 
 
-def render_preview(database, record):
+def render_preview(database, record, show_shortcuts=False):
     with contextlib.redirect_stdout(io.StringIO()) as output:
-        app.preview(database, record["id"])
+        app.preview(database, record["id"], show_shortcuts=show_shortcuts)
     return output.getvalue()
 
 
@@ -101,6 +101,85 @@ class PackageMenuTests(unittest.TestCase):
         pause.assert_not_called()
         self.assertNotIn("--noconfirm", call.call_args.args[0])
 
+    def test_wrapper_update_pauses_with_report_output_visible(self):
+        app.configure_helper("yay")
+        app.WRAPPER_ENABLED = True
+        selection = ("", "", [{"id": "update"}])
+        with patch.object(app, "update_system", return_value=True), patch.object(app, "picker", side_effect=[selection, None]), patch.object(app, "pause") as pause, patch.object(app, "clear_console") as clear:
+            app.main()
+        pause.assert_called_once_with("Packages")
+        clear.assert_not_called()
+
+    def test_ctrl_a_updates_from_main_menu_and_ctrl_o_opens_settings(self):
+        for shortcut, target in (("ctrl-a", "update_system"), ("ctrl-o", "settings_menu")):
+            with self.subTest(shortcut=shortcut), patch.object(app, "picker", side_effect=[("", shortcut, []), None]) as picker, patch.object(app, target, return_value=False) as action:
+                app.main()
+            action.assert_called_once_with()
+            self.assertTrue(picker.call_args_list[0].kwargs["global_shortcuts"])
+
+    def test_ctrl_o_opens_settings_from_package_browser(self):
+        with patch.object(app, "catalog", return_value=[]), patch.object(app, "picker", side_effect=[("", "ctrl-o", []), None]) as picker, patch.object(app, "settings_menu") as settings:
+            app.browse("install")
+        settings.assert_called_once_with()
+        self.assertTrue(picker.call_args_list[0].kwargs["global_shortcuts"])
+
+    def test_shortcut_bindings_preserve_ctrl_a_multiselect(self):
+        for multi, expected in ((True, "--expect=alt-t,ctrl-o"), (False, "--expect=ctrl-o,ctrl-a")):
+            with self.subTest(multi=multi), patch.object(app.subprocess, "run", return_value=subprocess.CompletedProcess([], 130, "")) as run:
+                app.picker([], "Test", multi=multi, global_shortcuts=True)
+            args = run.call_args.args[0]
+            self.assertIn(expected, args)
+            if multi:
+                self.assertIn("--bind=ctrl-a:select-all,ctrl-d:deselect-all", args)
+                header = next(option for option in args if option.startswith("--header="))
+                self.assertNotIn("Tab multi", header)
+                self.assertIn("SOURCE", header)
+
+    def test_package_preview_explains_shortcuts_and_resize(self):
+        with preview_catalog(package()) as database:
+            with patch.object(app, "capture", return_value="Name : example\nVersion : 1.0-1\n"):
+                output = render_preview(database, package(), show_shortcuts=True)
+        self.assertIn("Ctrl+O Settings", output)
+        self.assertIn("Shift+←/→ Resize", output)
+        self.assertIn("Ctrl+A/D Select matches / clear", output)
+        self.assertNotIn("Main menu:", output)
+
+    def test_main_menu_has_side_panel_and_no_status_or_shortcuts_above_list(self):
+        def run(args, **kwargs):
+            header = next(arg for arg in args if arg.startswith("--header="))
+            self.assertEqual(header, "--header=")
+            preview = next(arg for arg in args if arg.startswith("--preview="))
+            command = shlex.split(preview.removeprefix("--preview="))
+            database = Path(command[command.index("--preview") + 1])
+            panel = json.loads((database.parent / "panel.json").read_text())
+            self.assertFalse(panel["multi"])
+            self.assertIn("Helper: paru", panel["notes"])
+            self.assertIn("--with-nth=2", args)
+            return subprocess.CompletedProcess([], 130, "")
+
+        with patch.object(app.subprocess, "run", side_effect=run):
+            app.main()
+
+    def test_menu_panel_lists_main_shortcuts_without_querying_packages(self):
+        record = app.main_records()[0]
+        with preview_catalog(record) as database:
+            (database.parent / "panel.json").write_text(json.dumps({
+                "multi": False, "global_shortcuts": True, "notes": "Helper: paru",
+            }))
+            with patch.object(app, "capture") as capture:
+                output = render_preview(database, record, show_shortcuts=True)
+        self.assertIn("Ctrl+A Update system", output)
+        self.assertIn("Ctrl+O Settings", output)
+        self.assertIn("Helper: paru", output)
+        self.assertNotIn("Select matches", output)
+        capture.assert_not_called()
+
+    def test_empty_package_panel_still_explains_shortcuts(self):
+        with preview_catalog(package()) as database, contextlib.redirect_stdout(io.StringIO()) as output:
+            app.preview(database, "", show_shortcuts=True)
+        self.assertIn("Ctrl+O Settings", output.getvalue())
+        self.assertIn("No matching packages.", output.getvalue())
+
     def test_update_error_is_displayed_and_paused(self):
         selection = ("", "", [{"id": "update"}])
         with patch.object(app, "picker", side_effect=[selection, None]), patch.object(app.subprocess, "call", return_value=7), patch.object(app, "pause") as pause, contextlib.redirect_stdout(io.StringIO()) as output:
@@ -160,7 +239,6 @@ class PackageMenuTests(unittest.TestCase):
             database = directory / "catalog.json"
             database.write_text(json.dumps({record["id"]: record for record in records}))
             (directory / "installed.json").write_text("[]")
-            (directory / "header.txt").write_text("SOURCE PACKAGE")
             with patch.object(app.time, "sleep"), patch.object(app, "aur_search", side_effect=OSError("offline")), contextlib.redirect_stdout(io.StringIO()) as output:
                 app.merged_search(database, "steam")
             self.assertIn("cachyos-v3/steam", output.getvalue())
@@ -183,7 +261,6 @@ class PackageMenuTests(unittest.TestCase):
             record = package("steam", source="multilib")
             database.write_text(json.dumps({record["id"]: record}))
             (directory / "installed.json").write_text('["steam-test"]')
-            (directory / "header.txt").write_text("SOURCE PACKAGE")
             with patch.object(app.time, "sleep"), patch.object(app, "aur_search", return_value=[package("steam-test", kind="aur", source="aur")]) as search, contextlib.redirect_stdout(io.StringIO()) as output:
                 app.merged_search(database, "s")
                 search.assert_not_called()
@@ -201,6 +278,7 @@ class PackageMenuTests(unittest.TestCase):
         self.assertIn("--id-nth=1", args)
         self.assertIn("--no-sort", args)
         self.assertTrue(any("change:reload-sync(" in arg for arg in args))
+        self.assertIn("--bind=load:refresh-preview", args)
         self.assertNotIn("--expect=alt-a,alt-r,alt-t", args)
 
     def test_failed_repo_transaction_does_not_start_aur_transaction(self):
@@ -276,9 +354,11 @@ class PackageMenuTests(unittest.TestCase):
         self.assertTrue(any("shift-left:transform(" in arg and "shift-right:transform(" in arg
                             for arg in run.call_args.args[0]))
         self.assertNotIn("--no-input", run.call_args.args[0])
-        self.assertTrue(any(arg.endswith(" {1}") for arg in run.call_args.args[0]))
+        self.assertTrue(any(arg.endswith(" {1} {q}") for arg in run.call_args.args[0]))
         header = next(arg for arg in run.call_args.args[0] if arg.startswith("--header="))
-        self.assertIn("Alt+P preview · Alt+T Traur audit", header)
+        self.assertNotIn("Tab multi", header)
+        self.assertIn("SOURCE", header)
+        self.assertTrue(any("--shortcuts" in arg for arg in run.call_args.args[0]))
         self.assertNotIn("A–Z per source", header)
 
     def test_preview_resize_moves_divider_in_both_directions_and_stops_at_limits(self):
@@ -679,6 +759,14 @@ class PackageMenuTests(unittest.TestCase):
             self.assertEqual(picker.call_count, 2)
             self.assertEqual(picker.call_args_list[0].args[1], picker.call_args_list[1].args[1])
             self.assertEqual(picker.call_args_list[1].args[2], "systemd")
+
+    def test_aur_install_reports_remain_visible_before_reloading_the_list(self):
+        record = package(kind="aur", source="aur")
+        for protection in ("WRAPPER_ENABLED", "TRAUR_ENABLED"):
+            with self.subTest(protection=protection), patch.object(app, protection, True), patch.object(app, "catalog", return_value=[record]), patch.object(app, "picker", side_effect=[("", "", [record]), None]), patch.object(app, "perform"), patch.object(app, "pause") as pause, patch.object(app, "clear_console") as clear, contextlib.redirect_stdout(io.StringIO()):
+                app.browse("install")
+            pause.assert_called_once_with("Find & install")
+            clear.assert_not_called()
 
     def test_failed_operation_waits_then_restores_the_same_list(self):
         record = package()

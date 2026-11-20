@@ -4,15 +4,17 @@ import colorsys
 import datetime
 import getpass
 import hashlib
+import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import time
@@ -35,6 +37,18 @@ WRAPPER_ENABLED = False
 BUNDLED_WRAPPER = HERE.parent / "makepkg-wrapper"
 PREVIEW_MODE = "details"
 LAST_SKIPPED = []
+GITHUB_SOURCE_ARCHIVE = "https://codeload.github.com/ajsem1337/package-menu/tar.gz/refs/heads/main"
+MAX_UPDATE_ARCHIVE_SIZE = 25 * 1024 * 1024
+MAX_UPDATE_FILE_SIZE = 1024 * 1024
+UPDATE_FILES = {
+    "guard.py": ("share/package-menu/guard.py", "644"),
+    "makepkg-wrapper": ("share/package-menu/makepkg-wrapper", "755"),
+    "LICENSE": ("share/licenses/package-menu/LICENSE", "644"),
+    "LICENSE-OMARCHY": ("share/licenses/package-menu/LICENSE-OMARCHY", "644"),
+    "bin/package-menu": ("bin/package-menu", "755"),
+    "app.py": ("share/package-menu/app.py", "644"),
+    "VERSION": ("share/package-menu/VERSION", "644"),
+}
 
 
 class Error(Exception):
@@ -387,8 +401,7 @@ def merged_search(database, query):
         json.dump(lookup, output)
         temporary = Path(output.name)
     temporary.replace(database)
-    base = (directory / "header.txt").read_text()
-    (directory / "status.txt").write_text(status + "\n" + base)
+    (directory / "status.txt").write_text(status)
     print(picker_rows(sorted(lookup.values(), key=source_order)), flush=True)
 
 
@@ -461,56 +474,74 @@ def preview_mode(database, mode):
     return "refresh-preview"
 
 
-def picker(records, title, query="", multi=True, keys="", preview=True, searchable=True, merged=False, show_state=True):
+def picker(records, title, query="", multi=True, keys="", preview=True, searchable=True, merged=False, show_state=True,
+           global_shortcuts=False):
     clear_console()
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     with tempfile.TemporaryDirectory(prefix="package-menu-", dir=runtime) as directory:
         database = Path(directory) / "catalog.json"
         database.write_text(json.dumps({record["id"]: record for record in records}))
-        header = "Tab multi · Enter confirm · Esc back · Shift+←/→ resize\nCtrl+A all · Ctrl+D clear · Alt+P preview · Alt+T Traur audit" if multi else "↑/↓ choose · Enter open · Esc exit"
-        if multi and preview:
-            header += "\nAlt+D compact / full details · Alt+B AUR PKGBUILD"
-        if keys:
-            header += "\n" + keys
+        if preview:
+            header = ""
+        elif multi:
+            header = "Tab multi · Enter confirm · Esc back · Shift+←/→ resize\nCtrl+A all · Ctrl+D clear · Alt+P preview · Alt+T Traur audit"
+        else:
+            header = "↑/↓ choose · Enter open · Esc exit"
+        if keys and not preview:
+            header += ("\n" if header else "") + keys
         if multi:
-            header += f"\n{'SOURCE':<16} {'PACKAGE':<26} {'VERSION':<14}"
+            header += ("\n" if header else "") + f"{'SOURCE':<16} {'PACKAGE':<26} {'VERSION':<14}"
             if show_state:
                 header += " STATE"
+        expected = ["alt-t"] if multi else []
+        if global_shortcuts:
+            expected.append("ctrl-o")
+            if not multi:
+                expected.append("ctrl-a")
         args = ["fzf", "--layout=reverse", "--border=rounded", "--info=inline", "--no-separator", *search_options(), "--print-query",
-                "--expect=alt-t", "--query=" + query,
+                "--expect=" + ",".join(expected or ["enter"]), "--query=" + query,
                 "--border-label= " + title + " ", "--header=" + header, *theme_options()]
         if searchable:
             args += ["--prompt=Search packages > "]
         else:
-            args += ["--no-input", "--disabled", "--info=hidden", "--with-nth=2,4", "--nth=1"]
+            args += ["--no-input", "--disabled", "--info=hidden",
+                     "--with-nth=2" if preview else "--with-nth=2,4", "--nth=1"]
         if merged:
             (Path(directory) / "installed.json").write_text(json.dumps(capture(["pacman", "-Qq"]).splitlines()))
-            (Path(directory) / "header.txt").write_text(header)
-            (Path(directory) / "status.txt").write_text("AUR: type at least 2 characters\n" + header)
+            (Path(directory) / "status.txt").write_text("AUR: type at least 2 characters")
             command = "exec " + shlex.join(frontend_command("--search", str(database))) + " {q}"
-            status = shlex.join(["cat", str(Path(directory) / "status.txt")])
             args += ["--id-nth=1", "--bind=start:reload-sync(" + command + "),change:reload-sync(" + command + ")",
-                     "--bind=load:transform-header(" + status + ")"]
+                     "--bind=load:refresh-preview"]
         if multi:
             args += [f"--multi={MAX_BATCH}", "--bind=ctrl-a:select-all,ctrl-d:deselect-all"]
         if preview:
             (Path(directory) / "preview-mode").write_text(PREVIEW_MODE)
-            command = shlex.join(frontend_command("--preview", str(database))) + " {1}"
+            (Path(directory) / "panel.json").write_text(json.dumps({
+                "multi": multi, "global_shortcuts": global_shortcuts, "notes": keys,
+            }))
+            # {q} also runs the panel when the result list is empty.
+            command = shlex.join(frontend_command("--preview", str(database), "--shortcuts")) + " {1} {q}"
             size_file = Path(directory) / "preview-size"
             size_file.write_text("48")
             resize = shlex.join(frontend_command("--resize-preview", str(size_file)))
             mode = shlex.join(frontend_command("--preview-mode", str(database)))
             args += ["--preview=" + command, "--preview-window=right,48%,wrap", "--bind=alt-p:toggle-preview",
-                     "--bind=alt-d:transform(" + mode + " details),alt-b:transform(" + mode + " recipe)",
+                     "--bind=shift-up:preview-up,shift-down:preview-down",
                      "--bind=shift-left:transform(" + resize + " 5),shift-right:transform(" + resize + " -5)"]
+            if multi:
+                args += ["--bind=alt-d:transform(" + mode + " details),alt-b:transform(" + mode + " recipe)"]
         else:
             args += ["--preview-window=hidden"]
         selected = subprocess.run(args, input=picker_rows(records, show_state=show_state), text=True, stdout=subprocess.PIPE)
-        if selected.returncode in (1, 130):
-            return None
-        if selected.returncode:
-            raise Error("fzf could not open the package selector.")
         output = selected.stdout.splitlines()
+        if selected.returncode == 130:
+            return None
+        if selected.returncode == 1 and not (len(output) >= 2 and output[1] in expected):
+            return None
+        if selected.returncode not in (0, 1):
+            raise Error("fzf could not open the package selector.")
+        if len(output) < 2:
+            raise Error("fzf returned an invalid selection.")
         lookup = json.loads(database.read_text())
         chosen = [lookup[line.split("\t", 1)[0]] for line in output[2:]]
         return output[0], output[1], chosen
@@ -598,12 +629,50 @@ def preview_aur(directory, record, mode, local_fields=None):
         print("\nAUR preview unavailable:", text(error))
 
 
-def preview(database, identifier):
-    record = json.loads(Path(database).read_text()).get(identifier)
-    if not record:
-        raise Error("The selected package is no longer in this list.")
-    print(text(record["name"]), flush=True)
+def preview_shortcuts(directory, record):
+    path = directory / "panel.json"
+    panel = json.loads(path.read_text()) if path.exists() else {"multi": True, "global_shortcuts": True}
+    print("SHORTCUTS")
+    print("↑/↓ Move · Enter confirm · Esc back")
+    if panel["multi"]:
+        print("Tab/Shift+Tab Select / unselect")
+        print("Ctrl+A/D Select matches / clear")
+    elif panel["global_shortcuts"]:
+        print("Ctrl+A Update system")
+    if panel["global_shortcuts"]:
+        print("Ctrl+O Settings · Alt+P Pane")
+    else:
+        print("Alt+P Toggle side pane")
+    print("Shift+←/→ Resize · Shift+↑/↓ Scroll")
+    if panel["multi"]:
+        print("Alt+D Compact / full details")
+        print("Alt+B PKGBUILD · Alt+T Traur (AUR)")
+    status = directory / "status.txt"
+    notes = [panel.get("notes", ""), status.read_text() if status.exists() else ""]
+    if any(notes):
+        print("\nSTATUS")
+        for note in filter(None, notes):
+            for line in note.splitlines():
+                print(text(line))
+    if record and record["kind"] == "menu" and record.get("description"):
+        print("\n" + text(record["name"]))
+        print(text(record["description"]))
+    print(flush=True)
+
+
+def preview(database, identifier, show_shortcuts=False):
     directory = Path(database).parent
+    record = json.loads(Path(database).read_text()).get(identifier)
+    if show_shortcuts:
+        preview_shortcuts(directory, record)
+    if not record:
+        if show_shortcuts and not identifier:
+            print("No matching packages.")
+            return
+        raise Error("The selected package is no longer in this list.")
+    if record["kind"] == "menu":
+        return
+    print(text(record["name"]), flush=True)
     mode_file = directory / "preview-mode"
     mode = mode_file.read_text() if mode_file.exists() else PREVIEW_MODE
     if mode == "details" and record.get("source_detail"):
@@ -624,8 +693,9 @@ def preview(database, identifier):
             sys.stdout.flush()
     if is_aur:
         preview_aur(directory, record, mode, fields)
-    print("\nAlt+D " + ("compact view" if mode == "details" else "full details")
-          + (" · Alt+B " + ("back" if mode == "recipe" else "PKGBUILD") if is_aur else ""))
+    if not show_shortcuts:
+        print("\nAlt+D " + ("compact view" if mode == "details" else "full details")
+              + (" · Alt+B " + ("back" if mode == "recipe" else "PKGBUILD") if is_aur else ""))
 
 
 def validate_selection(records):
@@ -650,7 +720,7 @@ def remove_orphans():
     if names:
         code = subprocess.call(["sudo", "pacman", "-Rns", "--", *names])
         if code:
-            raise Error(f"Package operation stopped (exit {code}). No fallback was attempted.")
+            raise Error(f"Package operation stopped (exit {code}).")
     clear_console()
 
 
@@ -729,7 +799,7 @@ def run_transaction(command, system_update=False):
     code = subprocess.call(command)
     if code:
         label = "System update" if system_update else "Package operation"
-        raise Error(f"{label} stopped (exit {code}). No fallback was attempted.")
+        raise Error(f"{label} stopped (exit {code}).")
 
 
 def skip_package(record, reason, approval_keys=(), preflight=False, updating=False):
@@ -737,7 +807,7 @@ def skip_package(record, reason, approval_keys=(), preflight=False, updating=Fal
              "approval_keys": list(approval_keys), "preflight": preflight, "updating": updating}
     LAST_SKIPPED[:] = [item for item in LAST_SKIPPED if item["name"] != entry["name"]]
     LAST_SKIPPED.append(entry)
-    print(f"\nSKIPPED {entry['name']}: {entry['reason']}\nReview this package before retrying. Continuing with other packages.", flush=True)
+    print(f"\nSKIPPED {entry['name']}: {entry['reason']}", flush=True)
 
 
 def skipped_summary():
@@ -796,7 +866,7 @@ def run_aur_target(record, updating=False, force=False, approval_keys=()):
         skip_package(record, "; ".join(dict.fromkeys(reasons)), blocked_keys, updating=updating)
         return False
     if code:
-        raise Error(f"Package operation stopped (exit {code}). No fallback was attempted.")
+        raise Error(f"AUR package {record['name']} operation stopped (exit {code}).")
     LAST_SKIPPED[:] = [item for item in LAST_SKIPPED if item["name"] != record["name"]]
     return True
 
@@ -885,6 +955,7 @@ def audit_update():
     names = aur_update_names()
     if names:
         audit([{"name": name, "kind": "aur", "source": "aur"} for name in names], strict=True)
+    return bool(names)
 
 
 def update_system():
@@ -894,24 +965,248 @@ def update_system():
         # Its native behavior remains intact; compatible helpers can select the
         # Paru/yay or Aura command style in Settings for managed AUR updates.
         commands = update_commands()
-        audit_update()
+        reports = audit_update()
         for command in commands:
+            print("Updating system packages...", flush=True)
             run_transaction(command, system_update=True)
-        return
+        return bool(reports)
     repository_command = [AUR_HELPER, "-Syu"]
     if HELPER_STYLE == "pacman":
         repository_command.append("--repo")
+    print("Updating repository packages...", flush=True)
     run_transaction(repository_command, system_update=True)
+    print("Checking for AUR updates...", flush=True)
     names = aur_update_names()
+    if not names:
+        print("No AUR updates found.", flush=True)
+        return False
+    print(f"Found {len(names)} AUR update(s).", flush=True)
     pending = set(names)
     for index, name in enumerate(names):
         if name not in pending:
             continue
         record = {"name": name, "source": "aur", "kind": "aur", "version": ""}
-        if run_aur_target(record, updating=True) and index + 1 < len(names):
+        print(f"\nUpdating AUR package {index + 1}/{len(names)}: {name}", flush=True)
+        updated = run_aur_target(record, updating=True)
+        if updated:
+            print(f"Finished AUR package: {name}", flush=True)
+        if updated and index + 1 < len(names):
             # A successful target may have upgraded other targets as dependencies.
             # Re-query before attempting the next one instead of reinstalling it.
             pending = set(aur_update_names())
+    return bool(TRAUR_ENABLED or WRAPPER_ENABLED or LAST_SKIPPED)
+
+
+def installed_prefix():
+    if HERE.parent.name != "package-menu" or HERE.parent.parent.name != "share":
+        return None
+    prefix = HERE.parents[2]
+    if not (prefix / "bin/package-menu").is_file():
+        return None
+    return prefix
+
+
+def version_from_bytes(value):
+    try:
+        version = value.decode("ascii").strip()
+    except UnicodeError:
+        raise Error("GitHub returned an invalid package-menu version.") from None
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise Error("GitHub returned an invalid package-menu version.")
+    return version
+
+
+def current_version():
+    path = HERE.parent / "VERSION"
+    try:
+        return version_from_bytes(path.read_bytes())
+    except OSError as error:
+        raise Error("Could not read the installed package-menu version: " + text(error)) from error
+
+
+def extract_update_files(payload):
+    files = {}
+    wanted = {PurePosixPath(name).parts for name in UPDATE_FILES}
+    root, total = None, 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+            for index, member in enumerate(archive):
+                total += member.size
+                if index >= 10000 or total > MAX_UPDATE_ARCHIVE_SIZE:
+                    raise Error("GitHub source archive exceeds the unpacked size limit.")
+                parts = PurePosixPath(member.name).parts
+                if PurePosixPath(member.name).is_absolute() or not parts or ".." in parts:
+                    raise Error("GitHub source archive contains an invalid path.")
+                root = root or parts[0]
+                if parts[0] != root:
+                    raise Error("GitHub source archive contains multiple source directories.")
+                relative = parts[1:] if len(parts) > 1 else ()
+                if relative not in wanted:
+                    continue
+                if not member.isfile() or member.size > MAX_UPDATE_FILE_SIZE:
+                    raise Error("GitHub source archive contains an invalid install file.")
+                if relative in files:
+                    raise Error("GitHub source archive contains duplicate install files.")
+                source = archive.extractfile(member)
+                if source is None:
+                    raise Error("Could not read an install file from the GitHub archive.")
+                data = source.read(MAX_UPDATE_FILE_SIZE + 1)
+                if len(data) != member.size or len(data) > MAX_UPDATE_FILE_SIZE:
+                    raise Error("GitHub source archive contains an invalid install file.")
+                files[relative] = data
+    except (tarfile.TarError, OSError, EOFError):
+        raise Error("Could not read the GitHub source archive.") from None
+    missing = wanted.difference(files)
+    if missing:
+        raise Error("GitHub source archive is missing required package-menu files.")
+    version = version_from_bytes(files[("VERSION",)])
+    try:
+        for name in ("app.py", "guard.py"):
+            compile(files[(name,)], name, "exec")
+    except (SyntaxError, UnicodeError, ValueError):
+        raise Error("GitHub source contains invalid Python code; nothing was installed.") from None
+    return {"/".join(path): data for path, data in files.items()}, version
+
+
+def github_update_files():
+    request = urllib.request.Request(
+        GITHUB_SOURCE_ARCHIVE, headers={"User-Agent": "package-menu"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            payload = response.read(MAX_UPDATE_ARCHIVE_SIZE + 1)
+    except (urllib.error.URLError, OSError, TimeoutError) as error:
+        raise Error("Could not download package-menu from GitHub: " + text(error)) from error
+    if len(payload) > MAX_UPDATE_ARCHIVE_SIZE:
+        raise Error("GitHub source archive is too large.")
+    return extract_update_files(payload)
+
+
+def package_owner(path):
+    pacman = shutil.which("pacman")
+    if not pacman:
+        return ""
+    process = subprocess.run(
+        [pacman, "-Qo", str(path)], text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, env=dict(os.environ, LC_ALL="C"),
+    )
+    if process.returncode == 1:
+        return ""
+    if process.returncode:
+        raise Error(text(process.stderr) or "Could not check package ownership.")
+    match = re.search(r" is owned by ([^\s]+) ", process.stdout)
+    if not match:
+        raise Error("Could not identify the system package that owns package-menu.")
+    return match.group(1)
+
+
+def update_targets(prefix):
+    targets = []
+    for source, (destination, mode) in UPDATE_FILES.items():
+        target = prefix / destination
+        for parent in target.parents:
+            if parent == prefix:
+                break
+            if parent.is_symlink():
+                raise Error("Refusing to update through a symlink: " + str(parent))
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise Error("Refusing to replace a non-regular install file: " + str(target))
+        targets.append((source, mode, target))
+    return targets
+
+
+def install_update_files(prefix, files):
+    if set(files) != set(UPDATE_FILES):
+        raise Error("The update does not contain the expected install files.")
+    targets = update_targets(prefix)
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    with tempfile.TemporaryDirectory(prefix="package-menu-update-", dir=runtime) as directory:
+        staging = Path(directory)
+        backups = {}
+        elevated = False
+        for index, (source, _, target) in enumerate(targets):
+            if target.exists():
+                backup = staging / f"backup-{index}"
+                backup.write_bytes(target.read_bytes())
+                backups[source] = (backup, f"{target.stat().st_mode & 0o777:o}")
+            parent = target.parent
+            while not parent.exists():
+                parent = parent.parent
+            elevated |= not os.access(parent, os.W_OK | os.X_OK)
+        for source, data in files.items():
+            path = staging / source
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        elevated = os.geteuid() != 0 and elevated
+        sudo = shutil.which("sudo") if elevated else None
+        if elevated and not sudo:
+            raise Error("System installation needs write access to " + str(prefix) + " or sudo.")
+        command_prefix = [sudo, "--"] if sudo else []
+
+        def command(*arguments):
+            code = subprocess.call([*command_prefix, *arguments])
+            if code:
+                raise Error(f"Update command failed (exit {code}): {arguments[0]}")
+
+        def temporary(target):
+            return target.with_name("." + target.name + "." + staging.name)
+
+        def replace(source, mode, target):
+            command("install", "-Dm" + mode, str(source), str(temporary(target)))
+            command("mv", "-fT", "--", str(temporary(target)), str(target))
+
+        changed = []
+        try:
+            # Prepare every file before replacing any installed file.
+            for source, mode, target in targets:
+                command("install", "-Dm" + mode, str(staging / source), str(temporary(target)))
+            for source, _, target in targets:
+                changed.append((source, target))
+                command("mv", "-fT", "--", str(temporary(target)), str(target))
+        except (Error, OSError, KeyboardInterrupt) as error:
+            failed = []
+            for source, target in reversed(changed):
+                try:
+                    if source in backups:
+                        backup, mode = backups[source]
+                        replace(backup, mode, target)
+                    else:
+                        command("rm", "-f", "--", str(target))
+                except (Error, OSError) as rollback_error:
+                    failed.append(text(rollback_error))
+            if failed:
+                raise Error("Update failed and could not restore all files. Reinstall package-menu. "
+                            + "; ".join(failed)) from error
+            raise
+        finally:
+            for _, _, target in targets:
+                if temporary(target).exists():
+                    command("rm", "-f", "--", str(temporary(target)))
+
+
+def update_package_menu():
+    prefix = installed_prefix()
+    if prefix is None:
+        raise Error("Update package-menu from its installed command, not a source checkout.")
+    for _, _, target in update_targets(prefix):
+        owner = package_owner(target)
+        if owner:
+            raise Error(f"package-menu is managed by {owner}; update that package, not the in-app updater.")
+    current = current_version()
+    print("Checking GitHub main for package-menu updates...", flush=True)
+    files, latest = github_update_files()
+    if all((prefix / destination).is_file()
+           and (prefix / destination).read_bytes() == files[source]
+           for source, (destination, _) in UPDATE_FILES.items()):
+        print(f"package-menu {current} is already up to date.", flush=True)
+        return False
+    print(f"GitHub main has package-menu {latest}; installed version is {current}.", flush=True)
+    if not confirm("Install the latest package-menu files from GitHub main?"):
+        print("Update cancelled.", flush=True)
+        return False
+    install_update_files(prefix, files)
+    print(f"Updated package-menu to {latest}.", flush=True)
+    return True
 
 
 def file_digest(value):
@@ -1001,7 +1296,6 @@ def pause(destination="Packages"):
 
 def show_error(error):
     print("\nSTOP:", text(error))
-    print("No automatic retry, alternative package source or security bypass was used.")
 
 
 def browse(action):
@@ -1011,14 +1305,16 @@ def browse(action):
         records = sorted(catalog(mode, query), key=source_order)
         title = {"install": "Find & install", "remove": "Installed / uninstall", "downgrade": "Downgrade (cache only)"}[action]
         merged = action == "install" and bool(AUR_HELPER)
-        hints = "Finish selections before changing the search" if merged else ""
-        if LAST_SKIPPED:
-            hints += "\n" + skipped_summary()
+        hints = skipped_summary()
         suffix = (" — repos + AUR" if merged else " — repositories") if action == "install" else " — installed"
-        selected = picker(records, title + suffix, query, keys=hints, merged=merged, show_state=action == "install")
+        selected = picker(records, title + suffix, query, keys=hints, merged=merged,
+                          show_state=action == "install", global_shortcuts=True)
         if selected is None:
             return
         query, key, chosen = selected
+        if key == "ctrl-o":
+            settings_menu()
+            continue
         if not chosen:
             continue
         try:
@@ -1027,7 +1323,11 @@ def browse(action):
                 pause(title)  # Keep explicit reports readable, then restore this list.
             elif key == "":
                 perform(action, chosen)
-                clear_console()
+                if action == "install" and (WRAPPER_ENABLED or TRAUR_ENABLED or LAST_SKIPPED) and any(
+                        record["kind"] == "aur" for record in chosen):
+                    pause(title)
+                else:
+                    clear_console()
                 # Reload this catalog, keeping its query and mode. Only Esc
                 # leaves the list and returns to the main Packages menu.
         except (Error, OSError) as error:
@@ -1127,11 +1427,12 @@ def settings_menu():
 def main_records():
     choices = [
         ("install", "Find & install", "Repositories + AUR" if AUR_HELPER else "Repository packages"),
-        ("remove", "Installed / uninstall", "List installed packages and select several to remove"),
-        ("orphans", "Remove orphans", "Remove all unused dependencies; pacman confirms the transaction"),
+        ("remove", "Installed / uninstall", "Select packages to remove"),
+        ("orphans", "Remove orphans", "Remove unused dependencies"),
         ("downgrade", "Downgrade", "Select previous versions from local caches"),
         ("vt", "VirusTotal", "Check a file/SHA-256; no upload"),
         ("update", "Update system", text(AUR_HELPER or "pacman")),
+        ("app-update", "Update package-menu", "GitHub main · installed " + current_version()),
         ("settings", "Settings", "Helper, Traur, wrapper, VirusTotal and package details"),
         ("exit", "Exit", ""),
     ]
@@ -1164,12 +1465,22 @@ def skipped_menu():
 def main():
     while True:
         try:
-            selected = picker(main_records(), "Packages", multi=False, preview=False, searchable=False,
+            selected = picker(main_records(), "Packages", multi=False, searchable=False,
                               keys=("Helper: " + text(AUR_HELPER) if AUR_HELPER else "Pacman only · AUR disabled")
-                                   + ("\n" + skipped_summary() if LAST_SKIPPED else ""))
-            if selected is None or not selected[2] or selected[2][0]["id"] == "exit":
+                                   + ("\n" + skipped_summary() if LAST_SKIPPED else ""),
+                              global_shortcuts=True)
+            if selected is None:
                 return
-            action = selected[2][0]["id"]
+            _, key, chosen = selected
+            if key == "ctrl-o":
+                settings_menu()
+                continue
+            if key == "ctrl-a":
+                action = "update"
+            elif not chosen or chosen[0]["id"] == "exit":
+                return
+            else:
+                action = chosen[0]["id"]
             if action in ("install", "remove", "downgrade"):
                 browse(action)
             elif action == "orphans":
@@ -1182,8 +1493,15 @@ def main():
             elif action == "skipped":
                 skipped_menu()
             elif action == "update":
-                update_system()
-                clear_console()
+                if update_system():
+                    pause("Packages")
+                else:
+                    clear_console()
+            elif action == "app-update":
+                updated = update_package_menu()
+                pause("Packages")
+                if updated:
+                    os.execv(sys.executable, [sys.executable, "-I", str(HERE), *sys.argv[1:]])
         except (Error, OSError) as error:
             show_error(error)
             pause()
@@ -1227,6 +1545,8 @@ def run(argv):
     activate_settings(settings)
     if argv == ["--settings"]:
         settings_menu()
+    elif len(argv) in (4, 5) and argv[0] == "--preview" and argv[2] == "--shortcuts":
+        preview(argv[1], argv[3], show_shortcuts=True)
     elif len(argv) == 3 and argv[0] == "--preview":
         preview(argv[1], argv[2])
     elif len(argv) == 3 and argv[0] == "--preview-mode":

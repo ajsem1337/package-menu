@@ -127,6 +127,7 @@ class GateTests(unittest.TestCase):
             _, allowed = guard.run_scan(self.recipe, scanner=scanner)
         self.assertTrue(allowed)
         self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Scanning build recipe", stderr.getvalue())
         self.assertIn("traur: test", stderr.getvalue())
         self.assertIn("Trust: TRUSTED", stderr.getvalue())
 
@@ -180,6 +181,28 @@ class GateTests(unittest.TestCase):
         scanner = self.fake_scanner("import time; time.sleep(30)")
         with self.assertRaises(guard.Blocked):
             guard.run_scan(self.recipe, scanner=scanner, timeout=0.05)
+
+    def test_interrupted_scan_kills_its_process_group_and_does_not_approve(self):
+        scanner = self.fake_scanner("pass")
+        with patch.object(guard.subprocess, "Popen") as start, patch.object(guard.os, "killpg") as kill:
+            process = start.return_value
+            process.pid = 12345
+            process.communicate.side_effect = [KeyboardInterrupt, ("", "")]
+            with self.assertRaises(KeyboardInterrupt):
+                guard.run_scan(self.recipe, scanner=scanner)
+        kill.assert_called_once_with(12345, guard.signal.SIGKILL)
+        self.assertEqual(process.communicate.call_count, 2)
+
+    def test_cancelled_gate_does_not_report_a_denial_or_execute_makepkg(self):
+        with patch.object(guard, "gate", side_effect=KeyboardInterrupt), patch.object(guard.Path, "cwd", return_value=self.recipe), patch.object(guard.os, "execve") as execute, patch.object(guard, "report_block") as report, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(guard.main([]), 130)
+        execute.assert_not_called()
+        report.assert_not_called()
+
+    def test_remote_scan_cannot_approve_a_report_for_another_package(self):
+        scanner = self.fake_scanner(f"import json; print(json.dumps({result()!r}))")
+        with self.assertRaisesRegex(guard.Blocked, "different AUR package"):
+            guard.run_scan(self.recipe, scanner=scanner, package="other")
 
     def test_pass_preserves_stdout_and_private_report(self):
         with patch.object(guard, "run_scan", return_value=(result(), True)), contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()):

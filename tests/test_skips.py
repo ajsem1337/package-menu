@@ -81,6 +81,21 @@ class SkipTests(unittest.TestCase):
         self.assertEqual([item.args[0] for item in transaction.call_args_list],
                          [["paru", "-Syu", "--repo"], ["paru", "-S", "--aur", "--", "first"]])
 
+    def test_system_update_reports_each_aur_target_and_progress(self):
+        with patch.object(app, "aur_update_names", side_effect=[["first", "second"], ["second"]]), patch.object(app, "run_aur_target", return_value=True) as update, patch.object(app.subprocess, "call", return_value=0):
+            app.update_system()
+        self.assertEqual([call.args[0]["name"] for call in update.call_args_list], ["first", "second"])
+        self.assertIn("Updating repository packages...", self.output.getvalue())
+        self.assertIn("Found 2 AUR update(s).", self.output.getvalue())
+        self.assertIn("Updating AUR package 1/2: first", self.output.getvalue())
+        self.assertIn("Finished AUR package: second", self.output.getvalue())
+
+    def test_aur_update_failure_identifies_the_package(self):
+        with patch.object(app, "aur_update_names", return_value=["broken"]), patch.object(app.subprocess, "call", side_effect=[0, 7]) as transaction:
+            with self.assertRaisesRegex(app.Error, "AUR package broken operation stopped \\(exit 7\\)"):
+                app.update_system()
+        self.assertEqual(transaction.call_count, 2)
+
     def test_preflight_warning_skips_only_bad_target(self):
         app.TRAUR_ENABLED = True
 
