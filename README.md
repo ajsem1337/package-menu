@@ -74,7 +74,9 @@ is respected). Without an available helper, AUR is disabled.
 | Shift+Up/Down | Scroll panel |
 
 The right-hand pane holds shortcuts and status messages. Package lists also show
-package details there.
+package details there. AUR shortcuts appear only for AUR packages. In **Find &
+install**, AUR search starts after two characters in the search box; repository
+packages are filtered locally without that minimum.
 
 VirusTotal can prompt for an API key, saved in `~/.config/package-menu/virustotal.key`
 with permissions `0600`. `VT_API_KEY` overrides it. Files are never uploaded.

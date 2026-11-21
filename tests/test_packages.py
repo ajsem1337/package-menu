@@ -160,8 +160,10 @@ class PackageMenuTests(unittest.TestCase):
         self.assertNotIn("right panel only", output)
 
     def test_shortcuts_are_grouped_aligned_and_have_one_action_per_row(self):
-        with preview_catalog(package()) as database, patch.object(app, "capture", return_value=""):
-            output = render_preview(database, package(), show_shortcuts=True)
+        record = package(kind="aur", source="aur")
+        with preview_catalog(record) as database, contextlib.redirect_stdout(io.StringIO()) as captured:
+            app.preview_shortcuts(database.parent, record)
+        output = captured.getvalue()
         plain = plain_preview(output)
         groups = ("Navigation", "Selection", "Panel", "AUR")
         self.assertEqual(sorted(groups, key=plain.index), list(groups))
@@ -176,6 +178,24 @@ class PackageMenuTests(unittest.TestCase):
         self.assertNotIn("Alt+T", rows["Alt+B"])
         self.assertNotIn("Esc", rows["Enter"])
         self.assertNotIn("Ctrl+D", rows["Ctrl+A"])
+
+    def test_aur_shortcuts_are_visible_only_for_the_focused_aur_package(self):
+        cases = [
+            ("repo", "core", False), ("repo", "extra", False),
+            ("repo", "cachyos-v3", False), ("repo", "chaotic-aur", False),
+            ("installed", "extra", False), ("installed", "local/unknown", False),
+            ("aur", "aur", True), ("installed", "aur", True),
+        ]
+        for kind, source, expected in cases:
+            record = package(kind=kind, source=source)
+            with self.subTest(kind=kind, source=source), preview_catalog(record) as database, contextlib.redirect_stdout(io.StringIO()) as captured:
+                app.preview_shortcuts(database.parent, record)
+            rows = shortcut_rows(captured.getvalue())
+            self.assertEqual("Alt+B" in rows, expected)
+            self.assertEqual("Alt+T" in rows, expected)
+        with preview_catalog(package()) as database, contextlib.redirect_stdout(io.StringIO()) as captured:
+            app.preview_shortcuts(database.parent, None)
+        self.assertNotIn("Alt+B", shortcut_rows(captured.getvalue()))
 
     def test_shortcut_styling_uses_theme_colors_and_respects_no_color(self):
         with preview_catalog(package()) as database:
@@ -315,8 +335,11 @@ class PackageMenuTests(unittest.TestCase):
             with patch.object(app.time, "sleep"), patch.object(app, "aur_search", return_value=[package("steam-test", kind="aur", source="aur")]) as search, contextlib.redirect_stdout(io.StringIO()) as output:
                 app.merged_search(database, "s")
                 search.assert_not_called()
+                self.assertEqual((directory / "status.txt").read_text(), app.AUR_SEARCH_HINT)
+                self.assertIn("search box", app.AUR_SEARCH_HINT)
                 app.merged_search(database, "steam")
                 search.assert_called_once_with("steam", {"steam-test"})
+                self.assertEqual((directory / "status.txt").read_text(), "AUR search results: 1")
             lookup = json.loads(database.read_text())
             self.assertIn("multilib/steam", lookup)
             self.assertIn("aur/steam-test", lookup)
@@ -650,6 +673,51 @@ class PackageMenuTests(unittest.TestCase):
                 capture.assert_called_with(["pacman", operation, "--", target])
                 app.preview_mode(database, "details")
                 self.assertEqual(render_preview(database, record), compact)
+
+    def test_styled_details_use_the_panel_theme_and_aligned_columns(self):
+        record = package(source="extra")
+        info = ("Version         : 1.0-1\nDescription     : Useful package\n"
+                "Licenses        : MIT\nDepends On      : glibc\n")
+        with preview_catalog(record) as database, patch.dict(app.os.environ, {}, clear=True), patch.object(app, "theme_options", return_value=["--color=fg:#123456", "--color=info:#abcdef"]), patch.object(app, "capture", return_value=info), patch.object(app, "aur_info") as aur:
+            output = render_preview(database, record, show_shortcuts=True)
+        self.assertIn("\033[1;38;2;171;205;239mPackage details", output)
+        self.assertIn("\033[1;38;2;18;52;86mexample", output)
+        self.assertIn("\033[1;38;2;18;52;86mVersion", output)
+        details = plain_preview(output).split("Package details\n", 1)[1]
+        self.assertIn("  " + f"{'Source':<16}" + "  extra", details)
+        self.assertIn("  " + f"{'Version':<16}" + "  1.0-1", details)
+        self.assertIn("  " + f"{'Description':<16}" + "  Useful package", details)
+        self.assertNotIn("Alt+B", output)
+        self.assertNotIn("Alt+T", output)
+        aur.assert_not_called()
+
+    def test_styled_details_keep_values_and_wrapping_for_repo_and_aur(self):
+        info = "Version : 1.0-1\nDescription : Useful package\nLicenses : MIT\nDepends On : glibc\n"
+        metadata = {"Version": "1.0-1", "Description": "Useful package", "License": ["MIT"], "Depends": ["glibc"]}
+        for kind, source in (("repo", "extra"), ("aur", "aur"), ("installed", "extra"), ("installed", "aur")):
+            record = package(kind=kind, source=source)
+            with self.subTest(kind=kind, source=source), preview_catalog(record) as database, patch.object(app, "capture", return_value=info), patch.object(app, "aur_info", return_value={"example": metadata}), patch.dict(app.os.environ, FZF_PREVIEW_COLUMNS="36"):
+                output = plain_preview(render_preview(database, record, show_shortcuts=True))
+            details = output.split("Package details\n", 1)[1]
+            self.assertTrue(all(len(line) <= 36 for line in details.splitlines()))
+            for label, value in (("Version", "1.0-1"), ("Description", "Useful package"), ("Licenses", "MIT"), ("Depends On", "glibc")):
+                self.assertIn("  " + f"{label:<16}" + "  " + value, details)
+
+    def test_aur_recipe_key_does_not_change_preview_mode_for_repository_packages(self):
+        for source in ("core", "extra", "cachyos-v3", "chaotic-aur"):
+            record = package(source=source)
+            with self.subTest(source=source), preview_catalog(record, "details") as database:
+                self.assertEqual(app.preview_mode(database, "recipe", record["id"]), "refresh-preview")
+                self.assertEqual((database.parent / "preview-mode").read_text(), "details")
+        record = package(kind="aur", source="aur")
+        with preview_catalog(record) as database:
+            app.preview_mode(database, "recipe", record["id"])
+            self.assertEqual((database.parent / "preview-mode").read_text(), "recipe")
+        with preview_catalog(package()) as database:
+            with patch.object(app, "activate_settings"), contextlib.redirect_stdout(io.StringIO()) as output:
+                app.run(["--preview-mode", str(database), "recipe", package()["id"]])
+            self.assertEqual(output.getvalue().strip(), "refresh-preview")
+            self.assertEqual((database.parent / "preview-mode").read_text(), "summary")
 
     def test_aur_and_repo_previews_share_field_order_in_search_and_installed(self):
         info = "Version         : 1.0-1\nDescription     : Useful package\nURL             : https://example.org\nLicenses        : MIT\nDepends On      : glibc\n"

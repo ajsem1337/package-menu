@@ -37,6 +37,7 @@ WRAPPER_ENABLED = False
 BUNDLED_WRAPPER = HERE.parent / "makepkg-wrapper"
 PREVIEW_MODE = "details"
 LAST_SKIPPED = []
+AUR_SEARCH_HINT = "AUR search starts after 2 characters in the search box."
 GITHUB_SOURCE_ARCHIVE = "https://codeload.github.com/ajsem1337/package-menu/tar.gz/refs/heads/main"
 MAX_UPDATE_ARCHIVE_SIZE = 25 * 1024 * 1024
 MAX_UPDATE_FILE_SIZE = 1024 * 1024
@@ -384,7 +385,7 @@ def merged_search(database, query):
     time.sleep(0.3)
     directory = Path(database).parent
     lookup = json.loads(Path(database).read_text())
-    status = "AUR: type at least 2 characters"
+    status = AUR_SEARCH_HINT
     if not AUR_HELPER:
         lookup = {key: record for key, record in lookup.items() if record["kind"] != "aur"}
         status = "Pacman only · AUR disabled"
@@ -393,7 +394,7 @@ def merged_search(database, query):
             installed = set(json.loads((directory / "installed.json").read_text()))
             aur = aur_search(query, installed)
             lookup.update({record["id"]: record for record in aur})
-            status = f"AUR: {len(aur)} results"
+            status = f"AUR search results: {len(aur)}"
         except (Error, OSError, ValueError, KeyError) as error:
             status = "AUR unavailable (local/cached results only): " + text(error)
     # Keep prior entries available for previews and selections during reload.
@@ -466,9 +467,13 @@ def resize_preview(path, delta):
     return f"change-preview-window(right,{size}%,wrap)+refresh-preview"
 
 
-def preview_mode(database, mode):
+def preview_mode(database, mode, identifier=None):
     if mode not in ("details", "recipe"):
         raise Error("Invalid preview mode.")
+    if mode == "recipe" and identifier is not None:
+        record = json.loads(Path(database).read_text()).get(identifier)
+        if not is_aur_package(record):
+            return "refresh-preview"
     path = Path(database).parent / "preview-mode"
     path.write_text("summary" if path.read_text() == mode else mode)
     return "refresh-preview"
@@ -508,7 +513,7 @@ def picker(records, title, query="", multi=True, keys="", preview=True, searchab
                      "--with-nth=2" if preview else "--with-nth=2,4", "--nth=1"]
         if merged:
             (Path(directory) / "installed.json").write_text(json.dumps(capture(["pacman", "-Qq"]).splitlines()))
-            (Path(directory) / "status.txt").write_text("AUR: type at least 2 characters")
+            (Path(directory) / "status.txt").write_text(AUR_SEARCH_HINT)
             command = "exec " + shlex.join(frontend_command("--search", str(database))) + " {q}"
             args += ["--id-nth=1", "--bind=start:reload-sync(" + command + "),change:reload-sync(" + command + ")",
                      "--bind=load:refresh-preview"]
@@ -529,7 +534,7 @@ def picker(records, title, query="", multi=True, keys="", preview=True, searchab
                      "--bind=shift-up:preview-up,shift-down:preview-down",
                      "--bind=shift-left:transform(" + resize + " 5),shift-right:transform(" + resize + " -5)"]
             if multi:
-                args += ["--bind=alt-d:transform(" + mode + " details),alt-b:transform(" + mode + " recipe)"]
+                args += ["--bind=alt-d:transform(" + mode + " details),alt-b:transform(" + mode + " recipe {1})"]
         else:
             args += ["--preview-window=hidden"]
         selected = subprocess.run(args, input=picker_rows(records, show_state=show_state), text=True, stdout=subprocess.PIPE)
@@ -547,14 +552,49 @@ def picker(records, title, query="", multi=True, keys="", preview=True, searchab
         return output[0], output[1], chosen
 
 
-def preview_fields(fields):
+def panel_palette():
+    return dict(option.removeprefix("--color=").split(":", 1) for option in theme_options())
+
+
+def panel_text(value, palette, bold=False, accent=False):
+    color = palette.get("info", "#cba6f7") if accent else palette.get("fg", "#cdd6f4")
+    return value if "NO_COLOR" in os.environ else colored(value, color, bold=bold)
+
+
+def panel_heading(title, palette):
+    print("\n" + panel_text(title, palette, bold=True, accent=True))
+
+
+def panel_rows(rows, palette, label_width=12):
+    width = max(24, int(os.environ.get("FZF_PREVIEW_COLUMNS", "80")))
+    indent = label_width + 4
+    for label, value in rows:
+        value = "  ".join(map(text, value)) if isinstance(value, list) else text(value if value is not None else "")
+        labels = textwrap.wrap(text(label), width=label_width, break_on_hyphens=False) or [""]
+        for line in labels[:-1]:
+            print("  " + panel_text(line, palette, bold=True))
+        lines = textwrap.wrap(value or "None", width=max(1, width - indent), break_on_hyphens=False)
+        print("  " + panel_text(f"{labels[-1]:<{label_width}}", palette, bold=True) + "  "
+              + panel_text(lines[0], palette))
+        for line in lines[1:]:
+            print(" " * indent + panel_text(line, palette))
+
+
+def is_aur_package(record):
+    return bool(record and (record["source"].casefold() == "aur" or record["kind"] == "aur"))
+
+
+def preview_fields(fields, palette=None):
+    if palette is not None:
+        panel_rows(fields, palette, label_width=16)
+        return
     for label, value in fields:
         value = "  ".join(map(text, value)) if isinstance(value, list) else text(value if value is not None else "")
         print(textwrap.fill(value or "None", width=max(24, int(os.environ.get("FZF_PREVIEW_COLUMNS", "80"))),
                             initial_indent=f"{label:<16}: ", subsequent_indent=" " * 18, break_on_hyphens=False))
 
 
-def preview_package_fields(fields, mode):
+def preview_package_fields(fields, mode, palette=None):
     """One field order and formatter for repository, AUR and installed packages."""
     order = ["Version", "Description", "URL", "Architecture", "Licenses", "Groups",
              "Provides", "Depends On", "Optional Deps", "Required By", "Optional For",
@@ -570,10 +610,10 @@ def preview_package_fields(fields, mode):
     if mode == "details":
         selected += [(key, value) for key, value in fields.items()
                      if key not in order and key not in ("Name", "Repository", "Installed From")]
-    preview_fields(selected)
+    preview_fields(selected, palette)
 
 
-def preview_aur(directory, record, mode, local_fields=None):
+def preview_aur(directory, record, mode, local_fields=None, palette=None):
     name = valid_name(record["name"])
     metadata = directory / ("aur-" + name + ".json")
     try:
@@ -594,7 +634,11 @@ def preview_aur(directory, record, mode, local_fields=None):
                 if content.lstrip().lower().startswith((b"<!doctype", b"<html")):
                     raise Error("AUR returned a web page, not a PKGBUILD.")
                 recipe.write_bytes(content)
-            print("Current AUR PKGBUILD · read-only · Alt+B back\n")
+            if palette is not None:
+                panel_heading("PKGBUILD", palette)
+                print("  Read-only preview. Alt+B returns to package details.\n")
+            else:
+                print("Current AUR PKGBUILD · read-only · Alt+B back\n")
             content = re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", recipe.read_text(errors="replace"))
             print(content)
             return
@@ -620,36 +664,25 @@ def preview_aur(directory, record, mode, local_fields=None):
             for label, key in (("Submitted", "FirstSubmitted"), ("Modified", "LastModified")):
                 if item.get(key):
                     fields[label] = datetime.datetime.fromtimestamp(item[key], datetime.timezone.utc).isoformat(timespec="minutes")
-        preview_package_fields(fields, mode)
+        preview_package_fields(fields, mode, palette)
     except (Error, OSError, ValueError, TypeError, OverflowError) as error:
         if local_fields:
-            preview_package_fields(local_fields, mode)
+            preview_package_fields(local_fields, mode, palette)
         elif record["kind"] != "installed":
             print(text(record.get("description", "")))
         print("\nAUR preview unavailable:", text(error))
 
 
-def preview_shortcuts(directory, record):
+def preview_shortcuts(directory, record, palette=None):
     path = directory / "panel.json"
     panel = json.loads(path.read_text()) if path.exists() else {"multi": True, "global_shortcuts": True}
-    palette = dict(option.removeprefix("--color=").split(":", 1) for option in theme_options())
-    foreground = palette.get("fg", "#cdd6f4")
-    accent = palette.get("info", "#cba6f7")
-    width = max(24, int(os.environ.get("FZF_PREVIEW_COLUMNS", "80")))
-
-    def style(value, color, bold=False):
-        return value if "NO_COLOR" in os.environ else colored(value, color, bold=bold)
+    palette = panel_palette() if palette is None else palette
 
     def section(title, rows):
-        print("\n" + style(title, accent, bold=True))
-        for key, description in rows:
-            lines = textwrap.wrap(description, width=width - 16, break_on_hyphens=False)
-            print("  " + style(f"{key:<12}", foreground, bold=True) + "  "
-                  + style(lines[0], foreground))
-            for line in lines[1:]:
-                print(" " * 16 + style(line, foreground))
+        panel_heading(title, palette)
+        panel_rows(rows, palette)
 
-    print(style("KEYBOARD SHORTCUTS", foreground, bold=True))
+    print(panel_text("KEYBOARD SHORTCUTS", palette, bold=True))
     navigation = [
         ("↑ / ↓", "Move through list"),
         ("Enter", "Confirm selection" if panel["multi"] else "Open selected action"),
@@ -675,7 +708,7 @@ def preview_shortcuts(directory, record):
         ("Shift+↑/↓", "Scroll panel"),
     ]
     section("Panel", panel_keys)
-    if panel["multi"]:
+    if panel["multi"] and is_aur_package(record):
         section("AUR", [
             ("Alt+B", "View AUR PKGBUILD"),
             ("Alt+T", "Run Traur audit"),
@@ -683,7 +716,7 @@ def preview_shortcuts(directory, record):
     status = directory / "status.txt"
     notes = [panel.get("notes", ""), status.read_text() if status.exists() else ""]
     if any(notes):
-        print("\n" + style("Status", accent, bold=True))
+        panel_heading("Status", palette)
         for note in filter(None, notes):
             for line in note.splitlines():
                 print("  " + text(line))
@@ -696,8 +729,9 @@ def preview_shortcuts(directory, record):
 def preview(database, identifier, show_shortcuts=False):
     directory = Path(database).parent
     record = json.loads(Path(database).read_text()).get(identifier)
+    palette = panel_palette() if show_shortcuts else None
     if show_shortcuts:
-        preview_shortcuts(directory, record)
+        preview_shortcuts(directory, record, palette)
     if not record:
         if show_shortcuts and not identifier:
             print("No matching packages.")
@@ -705,12 +739,23 @@ def preview(database, identifier, show_shortcuts=False):
         raise Error("The selected package is no longer in this list.")
     if record["kind"] == "menu":
         return
-    print(text(record["name"]), flush=True)
+    if palette is not None:
+        panel_heading("Package details", palette)
+        width = max(24, int(os.environ.get("FZF_PREVIEW_COLUMNS", "80")))
+        for line in textwrap.wrap(text(record["name"]), width=width - 2, break_on_hyphens=False):
+            print("  " + panel_text(line, palette, bold=True))
+        panel_rows([("Source", record["source"])], palette, label_width=16)
+        sys.stdout.flush()
+    else:
+        print(text(record["name"]), flush=True)
     mode_file = directory / "preview-mode"
     mode = mode_file.read_text() if mode_file.exists() else PREVIEW_MODE
     if mode == "details" and record.get("source_detail"):
-        print(text(record["source_detail"]))
-    is_aur = record["source"].casefold() == "aur" or record["kind"] == "aur"
+        if palette is not None:
+            panel_rows([("Origin note", record["source_detail"])], palette, label_width=16)
+        else:
+            print(text(record["source_detail"]))
+    is_aur = is_aur_package(record)
     fields = {}
     if record["kind"] != "aur" and not (is_aur and mode == "recipe"):
         operation = "-Qi" if record["kind"] == "installed" else "-Si"
@@ -722,10 +767,10 @@ def preview(database, identifier, show_shortcuts=False):
         if is_aur and fields.get("Packager") == "Unknown Packager":
             fields.pop("Packager")
         if not is_aur:
-            preview_package_fields(fields, mode)
+            preview_package_fields(fields, mode, palette)
             sys.stdout.flush()
     if is_aur:
-        preview_aur(directory, record, mode, fields)
+        preview_aur(directory, record, mode, fields, palette=palette)
     if not show_shortcuts:
         print("\nAlt+D " + ("compact view" if mode == "details" else "full details")
               + (" · Alt+B " + ("back" if mode == "recipe" else "PKGBUILD") if is_aur else ""))
@@ -1582,8 +1627,8 @@ def run(argv):
         preview(argv[1], argv[3], show_shortcuts=True)
     elif len(argv) == 3 and argv[0] == "--preview":
         preview(argv[1], argv[2])
-    elif len(argv) == 3 and argv[0] == "--preview-mode":
-        print(preview_mode(argv[1], argv[2]))
+    elif len(argv) in (3, 4) and argv[0] == "--preview-mode":
+        print(preview_mode(argv[1], argv[2], argv[3] if len(argv) == 4 else None))
     elif len(argv) == 3 and argv[0] == "--search":
         merged_search(argv[1], argv[2])
     elif len(argv) == 3 and argv[0] == "--resize-preview":
