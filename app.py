@@ -632,28 +632,61 @@ def preview_aur(directory, record, mode, local_fields=None):
 def preview_shortcuts(directory, record):
     path = directory / "panel.json"
     panel = json.loads(path.read_text()) if path.exists() else {"multi": True, "global_shortcuts": True}
-    print("SHORTCUTS")
-    print("↑/↓ Move in left list")
-    print("Enter Confirm · Esc Back")
-    if panel["multi"]:
-        print("Tab/Shift+Tab Select / unselect")
-        print("Ctrl+A/D Select matches / clear")
-    elif panel["global_shortcuts"]:
-        print("Ctrl+A Update system")
+    palette = dict(option.removeprefix("--color=").split(":", 1) for option in theme_options())
+    foreground = palette.get("fg", "#cdd6f4")
+    accent = palette.get("info", "#cba6f7")
+    width = max(24, int(os.environ.get("FZF_PREVIEW_COLUMNS", "80")))
+
+    def style(value, color, bold=False):
+        return value if "NO_COLOR" in os.environ else colored(value, color, bold=bold)
+
+    def section(title, rows):
+        print("\n" + style(title, accent, bold=True))
+        for key, description in rows:
+            lines = textwrap.wrap(description, width=width - 16, break_on_hyphens=False)
+            print("  " + style(f"{key:<12}", foreground, bold=True) + "  "
+                  + style(lines[0], foreground))
+            for line in lines[1:]:
+                print(" " * 16 + style(line, foreground))
+
+    print(style("KEYBOARD SHORTCUTS", foreground, bold=True))
+    navigation = [
+        ("↑ / ↓", "Move through list"),
+        ("Enter", "Confirm selection" if panel["multi"] else "Open selected action"),
+        ("Esc", "Go back"),
+    ]
     if panel["global_shortcuts"]:
-        print("Ctrl+O Settings")
-    print("Alt+P Show panel")
-    print("Shift + arrow key — Resize panel")
+        navigation.append(("Ctrl+O", "Open settings"))
+    section("Navigation", navigation)
     if panel["multi"]:
-        print("Alt+D Compact / full details")
-        print("Alt+B PKGBUILD · Alt+T Traur (AUR)")
+        section("Selection", [
+            ("Tab", "Toggle item and move down"),
+            ("Shift+Tab", "Toggle item and move up"),
+            ("Ctrl+A", "Select all matching packages"),
+            ("Ctrl+D", "Clear selected matches"),
+        ])
+    elif panel["global_shortcuts"]:
+        section("System", [("Ctrl+A", "Update system")])
+    panel_keys = [("Alt+P", "Show or hide panel")]
+    if panel["multi"]:
+        panel_keys.append(("Alt+D", "Toggle full package details"))
+    panel_keys += [
+        ("Shift+←/→", "Resize panel"),
+        ("Shift+↑/↓", "Scroll panel"),
+    ]
+    section("Panel", panel_keys)
+    if panel["multi"]:
+        section("AUR", [
+            ("Alt+B", "View AUR PKGBUILD"),
+            ("Alt+T", "Run Traur audit"),
+        ])
     status = directory / "status.txt"
     notes = [panel.get("notes", ""), status.read_text() if status.exists() else ""]
     if any(notes):
-        print("\nSTATUS")
+        print("\n" + style("Status", accent, bold=True))
         for note in filter(None, notes):
             for line in note.splitlines():
-                print(text(line))
+                print("  " + text(line))
     if record and record["kind"] == "menu" and record.get("description"):
         print("\n" + text(record["name"]))
         print(text(record["description"]))

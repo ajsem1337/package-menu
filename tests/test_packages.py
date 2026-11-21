@@ -2,6 +2,7 @@ import contextlib
 import hashlib
 import io
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -32,6 +33,15 @@ def render_preview(database, record, show_shortcuts=False):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         app.preview(database, record["id"], show_shortcuts=show_shortcuts)
     return output.getvalue()
+
+
+def plain_preview(output):
+    return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+
+
+def shortcut_rows(output):
+    return {line[2:14].rstrip(): line[16:] for line in plain_preview(output).splitlines()
+            if line.startswith("  ") and line[2:14].strip() and line[14:16] == "  "}
 
 
 class PackageMenuTests(unittest.TestCase):
@@ -139,17 +149,50 @@ class PackageMenuTests(unittest.TestCase):
         with preview_catalog(package()) as database:
             with patch.object(app, "capture", return_value="Name : example\nVersion : 1.0-1\n"):
                 output = render_preview(database, package(), show_shortcuts=True)
-        self.assertIn("Ctrl+O Settings", output)
-        self.assertIn("Shift + arrow key — Resize panel", output)
-        self.assertIn("Ctrl+A/D Select matches / clear", output)
+        rows = shortcut_rows(output)
+        self.assertEqual(rows["Ctrl+O"], "Open settings")
+        self.assertEqual(rows["Shift+←/→"], "Resize panel")
+        self.assertEqual(rows["Shift+↑/↓"], "Scroll panel")
+        self.assertEqual(rows["Ctrl+A"], "Select all matching packages")
         self.assertNotIn("Main menu:", output)
-        lines = output.splitlines()
-        self.assertIn("Ctrl+O Settings", lines)
-        self.assertIn("Alt+P Show panel", lines)
-        self.assertIn("↑/↓ Move in left list", lines)
-        self.assertIn("Shift + arrow key — Resize panel", lines)
+        self.assertEqual(rows["Alt+P"], "Show or hide panel")
+        self.assertEqual(rows["↑ / ↓"], "Move through list")
         self.assertNotIn("right panel only", output)
-        self.assertNotIn("Pane", output)
+
+    def test_shortcuts_are_grouped_aligned_and_have_one_action_per_row(self):
+        with preview_catalog(package()) as database, patch.object(app, "capture", return_value=""):
+            output = render_preview(database, package(), show_shortcuts=True)
+        plain = plain_preview(output)
+        groups = ("Navigation", "Selection", "Panel", "AUR")
+        self.assertEqual(sorted(groups, key=plain.index), list(groups))
+        rows = shortcut_rows(output)
+        self.assertEqual(list(rows), [
+            "↑ / ↓", "Enter", "Esc", "Ctrl+O",
+            "Tab", "Shift+Tab", "Ctrl+A", "Ctrl+D",
+            "Alt+P", "Alt+D", "Shift+←/→", "Shift+↑/↓", "Alt+B", "Alt+T",
+        ])
+        self.assertNotIn("·", plain)
+        self.assertNotIn("—", plain)
+        self.assertNotIn("Alt+T", rows["Alt+B"])
+        self.assertNotIn("Esc", rows["Enter"])
+        self.assertNotIn("Ctrl+D", rows["Ctrl+A"])
+
+    def test_shortcut_styling_uses_theme_colors_and_respects_no_color(self):
+        with preview_catalog(package()) as database:
+            with patch.dict(app.os.environ, {}, clear=True), patch.object(app, "capture", return_value=""), patch.object(app, "theme_options", return_value=["--color=fg:#123456", "--color=info:#abcdef"]):
+                output = render_preview(database, package(), show_shortcuts=True)
+            self.assertIn("\033[1;38;2;171;205;239mNavigation", output)
+            self.assertIn("\033[1;38;2;18;52;86m", output)
+            with patch.dict(app.os.environ, {"NO_COLOR": "1"}), patch.object(app, "capture", return_value=""):
+                output = render_preview(database, package(), show_shortcuts=True)
+            self.assertNotIn("\033", output)
+            self.assertEqual(shortcut_rows(output)["Shift+↑/↓"], "Scroll panel")
+
+    def test_shortcut_descriptions_wrap_under_the_description_column(self):
+        with preview_catalog(package()) as database, patch.dict(app.os.environ, FZF_PREVIEW_COLUMNS="36"), patch.object(app, "capture", return_value=""):
+            output = plain_preview(render_preview(database, package(), show_shortcuts=True))
+        self.assertTrue(all(len(line) <= 36 for line in output.splitlines()))
+        self.assertIn(" " * 16 + "packages", output)
 
     def test_main_menu_has_side_panel_and_no_status_or_shortcuts_above_list(self):
         def run(args, **kwargs):
@@ -175,16 +218,17 @@ class PackageMenuTests(unittest.TestCase):
             }))
             with patch.object(app, "capture") as capture:
                 output = render_preview(database, record, show_shortcuts=True)
-        self.assertIn("Ctrl+A Update system", output)
-        self.assertIn("Ctrl+O Settings", output)
+        rows = shortcut_rows(output)
+        self.assertEqual(rows["Ctrl+A"], "Update system")
+        self.assertEqual(rows["Ctrl+O"], "Open settings")
         self.assertIn("Helper: paru", output)
-        self.assertNotIn("Select matches", output)
+        self.assertNotIn("Selection", output)
         capture.assert_not_called()
 
     def test_empty_package_panel_still_explains_shortcuts(self):
         with preview_catalog(package()) as database, contextlib.redirect_stdout(io.StringIO()) as output:
             app.preview(database, "", show_shortcuts=True)
-        self.assertIn("Ctrl+O Settings", output.getvalue())
+        self.assertEqual(shortcut_rows(output.getvalue())["Ctrl+O"], "Open settings")
         self.assertIn("No matching packages.", output.getvalue())
 
     def test_update_error_is_displayed_and_paused(self):

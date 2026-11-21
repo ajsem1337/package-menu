@@ -123,9 +123,9 @@ class TerminalTests(unittest.TestCase):
         selected, _ = self.picker(
             None, rows=20, term="xterm-kitty", notes=notes,
             steps=[
-                (b"SCROLL_START", b"\x1b[1;2B" * 40),
-                (b"SCROLL_END", b"\x1b[1;2A" * 40),
-                (b"SCROLL_START", b"\x0f"),
+                (b"Navigation", b"\x1b[1;2B" * 45),
+                (b"SCROLL_END", b"\x1b[1;2A" * 45),
+                (b"Navigation", b"\x0f"),
             ],
         )
         self.assertEqual(selected[1], "ctrl-o")

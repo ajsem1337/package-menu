@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -188,8 +189,9 @@ class HelperSettingsTests(unittest.TestCase):
             self.assertIn("Active helper: paru", panel["notes"])
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 app.preview(database, next(iter(json.loads(database.read_text()))), show_shortcuts=True)
-            self.assertIn("Alt+P Show panel", output.getvalue().splitlines())
-            self.assertNotIn("Ctrl+A Update system", output.getvalue())
+            plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.getvalue())
+            self.assertRegex(plain, r"Alt\+P\s+Show or hide panel")
+            self.assertNotIn("Ctrl+A", plain)
             return subprocess.CompletedProcess(arguments, 130, "")
 
         with patch.object(app.subprocess, "run", side_effect=run):
