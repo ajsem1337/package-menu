@@ -633,17 +633,17 @@ def preview_shortcuts(directory, record):
     path = directory / "panel.json"
     panel = json.loads(path.read_text()) if path.exists() else {"multi": True, "global_shortcuts": True}
     print("SHORTCUTS")
-    print("↑/↓ Move · Enter confirm · Esc back")
+    print("↑/↓ Move in left list")
+    print("Enter Confirm · Esc Back")
     if panel["multi"]:
         print("Tab/Shift+Tab Select / unselect")
         print("Ctrl+A/D Select matches / clear")
     elif panel["global_shortcuts"]:
         print("Ctrl+A Update system")
     if panel["global_shortcuts"]:
-        print("Ctrl+O Settings · Alt+P Pane")
-    else:
-        print("Alt+P Toggle side pane")
-    print("Shift+←/→ Resize · Shift+↑/↓ Scroll")
+        print("Ctrl+O Settings")
+    print("Alt+P Show panel")
+    print("Shift + arrow key — Resize panel")
     if panel["multi"]:
         print("Alt+D Compact / full details")
         print("Alt+B PKGBUILD · Alt+T Traur (AUR)")
@@ -1350,8 +1350,8 @@ def helper_menu():
         ("aura", "Aura 4+", ""),
         ("custom", "Custom helper", "Executable and command syntax"),
     ])
-    selected = picker(choices, "Settings — AUR helper", multi=False, preview=False, searchable=False,
-                      keys="Selected: " + text(settings["helper"]) + " · Active: " + text(AUR_HELPER or "pacman") + " · Esc back")
+    selected = picker(choices, "Settings — AUR helper", multi=False, searchable=False,
+                      keys="Selected: " + text(settings["helper"]) + "\nActive helper: " + text(AUR_HELPER or "pacman"))
     if selected is None or not selected[2]:
         return
     helper = selected[2][0]["id"]
@@ -1366,7 +1366,7 @@ def helper_menu():
             ("aura", "Aura 4+ syntax", "-A; -Syu then -Au"),
             ("custom", "Custom arguments", "Configure install and update arguments"),
         ])
-        selected = picker(styles, "Helper command syntax", multi=False, preview=False, searchable=False)
+        selected = picker(styles, "Helper command syntax", multi=False, searchable=False)
         if selected is None or not selected[2]:
             return
         settings["style"] = selected[2][0]["id"]
@@ -1401,8 +1401,8 @@ def settings_records(settings):
 def settings_menu():
     while True:
         settings = read_settings()
-        selected = picker(settings_records(settings), "Settings", multi=False, preview=False, searchable=False,
-                          keys="Active: " + text(AUR_HELPER or "pacman") + " · Enter change · Esc back")
+        selected = picker(settings_records(settings), "Settings", multi=False, searchable=False,
+                          keys="Active helper: " + text(AUR_HELPER or "pacman"))
         if selected is None or not selected[2] or selected[2][0]["id"] == "back":
             return
         action = selected[2][0]["id"]
@@ -1444,7 +1444,7 @@ def main_records():
 def skipped_menu():
     while LAST_SKIPPED:
         records = menu_records([(str(index), item["name"], item["reason"]) for index, item in enumerate(LAST_SKIPPED)])
-        selected = picker(records, "Skipped AUR packages", multi=False, preview=False, searchable=False)
+        selected = picker(records, "Skipped AUR packages", multi=False, searchable=False)
         if selected is None or not selected[2]:
             return
         item = LAST_SKIPPED[int(selected[2][0]["id"])]

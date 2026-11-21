@@ -21,7 +21,8 @@ import app
 
 @unittest.skipUnless(shutil.which("fzf"), "fzf is required")
 class TerminalTests(unittest.TestCase):
-    def picker(self, keys, *, multi=False, empty=False):
+    def picker(self, keys, *, multi=False, empty=False, notes="Side status", steps=None, rows=40,
+               term="xterm-256color"):
         with tempfile.TemporaryDirectory(prefix="package-menu-tui-") as directory:
             root = Path(directory)
             result = root / "result.json"
@@ -30,10 +31,10 @@ class TerminalTests(unittest.TestCase):
             pid, terminal = pty.fork()
             if pid == 0:
                 try:
-                    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
+                    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, 140, 0, 0))
                     for name in ("FZF_DEFAULT_OPTS", "FZF_DEFAULT_OPTS_FILE", "XDG_RUNTIME_DIR"):
                         os.environ.pop(name, None)
-                    os.environ.update(TERM="xterm-256color", SHELL="/bin/sh", XDG_CONFIG_HOME=str(root))
+                    os.environ.update(TERM=term, SHELL="/bin/sh", XDG_CONFIG_HOME=str(root))
                     app.CONFIG_FILE = root / "package-menu/config.json"
                     app.configure_helper("pacman")
                     app.TRAUR_ENABLED = app.WRAPPER_ENABLED = False
@@ -42,7 +43,7 @@ class TerminalTests(unittest.TestCase):
                     ])
                     selected = app.picker(
                         records, "Terminal test", multi=multi, searchable=multi,
-                        global_shortcuts=True, keys="Side status",
+                        global_shortcuts=True, keys=notes,
                     )
                     result.write_text(json.dumps(selected))
                 except BaseException as error:
@@ -51,7 +52,8 @@ class TerminalTests(unittest.TestCase):
                     os._exit(0)
 
             output = bytearray()
-            sent = False
+            pending = list(steps) if steps is not None else [(b"Side status", keys)]
+            start = 0
             try:
                 deadline = time.monotonic() + 8
                 while time.monotonic() < deadline:
@@ -67,10 +69,11 @@ class TerminalTests(unittest.TestCase):
                     output.extend(chunk)
                     if b"\x1b[6n" in chunk:
                         os.write(terminal, b"\x1b[1;1R")
-                    if not sent and b"Side status" in output:
-                        os.write(terminal, keys)
-                        sent = True
-                self.assertTrue(sent, output.decode(errors="replace"))
+                    if pending and pending[0][0] in output[start:]:
+                        _, keypress = pending.pop(0)
+                        start = len(output)
+                        os.write(terminal, keypress)
+                self.assertFalse(pending, output.decode(errors="replace"))
                 self.assertTrue(result.exists(), output.decode(errors="replace"))
                 selected = json.loads(result.read_text())
                 self.assertNotIsInstance(selected, dict, selected)
@@ -114,6 +117,18 @@ class TerminalTests(unittest.TestCase):
     def test_resize_and_preview_modes_do_not_consume_the_selection(self):
         selected, _ = self.picker(b"\x1b[1;2D\x1bd\x1bb\x01\r", multi=True)
         self.assertEqual([record["id"] for record in selected[2]], ["first", "second"])
+
+    def test_shift_arrows_really_scroll_down_and_back_up_in_kitty(self):
+        notes = "SCROLL_START\n" + "\n".join(f"Panel line {index}" for index in range(40)) + "\nSCROLL_END"
+        selected, _ = self.picker(
+            None, rows=20, term="xterm-kitty", notes=notes,
+            steps=[
+                (b"SCROLL_START", b"\x1b[1;2B" * 40),
+                (b"SCROLL_END", b"\x1b[1;2A" * 40),
+                (b"SCROLL_START", b"\x0f"),
+            ],
+        )
+        self.assertEqual(selected[1], "ctrl-o")
 
 
 if __name__ == "__main__":

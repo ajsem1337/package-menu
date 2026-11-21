@@ -60,16 +60,18 @@ is respected). Without an available helper, AUR is disabled.
 
 | Key | Action |
 | --- | --- |
+| Up / Down | Move through the left list |
 | Enter / Esc | Confirm / back |
 | Tab / Shift+Tab | Select / unselect packages |
 | Ctrl+A | Update system in the main menu / select all matches in package lists |
 | Ctrl+D | Clear package selection |
 | Ctrl+O | Open Settings |
-| Alt+P / Alt+D | Toggle preview / full details |
+| Alt+P | Show / hide the right panel |
+| Alt+D | Toggle compact / full package details |
 | Alt+B | View AUR PKGBUILD |
 | Alt+T | Traur report |
-| Shift+Left/Right | Resize the package split view |
-| Shift+Up/Down | Scroll preview |
+| Shift+Left/Right | Resize panel |
+| Shift+Up/Down | Scroll panel |
 
 The right-hand pane holds shortcuts and status messages. Package lists also show
 package details there.

@@ -140,9 +140,16 @@ class PackageMenuTests(unittest.TestCase):
             with patch.object(app, "capture", return_value="Name : example\nVersion : 1.0-1\n"):
                 output = render_preview(database, package(), show_shortcuts=True)
         self.assertIn("Ctrl+O Settings", output)
-        self.assertIn("Shift+←/→ Resize", output)
+        self.assertIn("Shift + arrow key — Resize panel", output)
         self.assertIn("Ctrl+A/D Select matches / clear", output)
         self.assertNotIn("Main menu:", output)
+        lines = output.splitlines()
+        self.assertIn("Ctrl+O Settings", lines)
+        self.assertIn("Alt+P Show panel", lines)
+        self.assertIn("↑/↓ Move in left list", lines)
+        self.assertIn("Shift + arrow key — Resize panel", lines)
+        self.assertNotIn("right panel only", output)
+        self.assertNotIn("Pane", output)
 
     def test_main_menu_has_side_panel_and_no_status_or_shortcuts_above_list(self):
         def run(args, **kwargs):

@@ -174,6 +174,28 @@ class HelperSettingsTests(unittest.TestCase):
             app.run(["--settings"])
         settings.assert_called_once_with()
 
+    def test_settings_and_helper_menus_keep_status_in_the_side_panel(self):
+        def run(arguments, **kwargs):
+            self.assertIn("--header=", arguments)
+            self.assertIn("--preview-window=right,48%,wrap", arguments)
+            self.assertIn("--bind=shift-up:preview-up,shift-down:preview-down", arguments)
+            preview = next(arg for arg in arguments if arg.startswith("--preview="))
+            command = shlex.split(preview.removeprefix("--preview="))
+            database = Path(command[command.index("--preview") + 1])
+            panel = json.loads((database.parent / "panel.json").read_text())
+            self.assertFalse(panel["multi"])
+            self.assertFalse(panel["global_shortcuts"])
+            self.assertIn("Active helper: paru", panel["notes"])
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                app.preview(database, next(iter(json.loads(database.read_text()))), show_shortcuts=True)
+            self.assertIn("Alt+P Show panel", output.getvalue().splitlines())
+            self.assertNotIn("Ctrl+A Update system", output.getvalue())
+            return subprocess.CompletedProcess(arguments, 130, "")
+
+        with patch.object(app.subprocess, "run", side_effect=run):
+            app.settings_menu()
+            app.helper_menu()
+
     def test_cancelled_settings_do_not_write_files_or_change_the_helper(self):
         with patch.object(app, "picker", return_value=None):
             app.helper_menu()
