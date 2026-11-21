@@ -73,8 +73,8 @@ is respected). Without an available helper, AUR is disabled.
 | Shift+Left/Right | Resize panel |
 | Shift+Up/Down | Scroll panel |
 
-The right-hand pane holds shortcuts and status messages. Package lists also show
-package details there. AUR shortcuts appear only for AUR packages. In **Find &
+The right-hand pane holds shortcuts and package details.
+AUR shortcuts appear only for AUR packages. In **Find &
 install**, AUR search starts after two characters in the search box; repository
 packages are filtered locally without that minimum.
 

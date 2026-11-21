@@ -175,7 +175,7 @@ class HelperSettingsTests(unittest.TestCase):
             app.run(["--settings"])
         settings.assert_called_once_with()
 
-    def test_settings_and_helper_menus_keep_status_in_the_side_panel(self):
+    def test_settings_and_helper_menus_have_a_panel_without_status(self):
         def run(arguments, **kwargs):
             self.assertIn("--header=", arguments)
             self.assertIn("--preview-window=right,48%,wrap", arguments)
@@ -186,12 +186,13 @@ class HelperSettingsTests(unittest.TestCase):
             panel = json.loads((database.parent / "panel.json").read_text())
             self.assertFalse(panel["multi"])
             self.assertFalse(panel["global_shortcuts"])
-            self.assertIn("Active helper: paru", panel["notes"])
+            self.assertNotIn("notes", panel)
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 app.preview(database, next(iter(json.loads(database.read_text()))), show_shortcuts=True)
             plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.getvalue())
             self.assertRegex(plain, r"Alt\+P\s+Show or hide panel")
             self.assertNotIn("Ctrl+A", plain)
+            self.assertNotIn("Status", plain.splitlines())
             return subprocess.CompletedProcess(arguments, 130, "")
 
         with patch.object(app.subprocess, "run", side_effect=run):

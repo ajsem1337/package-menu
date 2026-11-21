@@ -194,7 +194,7 @@ class SkipTests(unittest.TestCase):
         with patch.object(app, "picker", return_value=None) as picker:
             app.main()
         self.assertIn("skipped", [record["id"] for record in picker.call_args.args[0]])
-        self.assertIn("bad", picker.call_args.kwargs["keys"])
+        self.assertEqual([item["name"] for item in app.LAST_SKIPPED], ["bad"])
 
 
 if __name__ == "__main__":

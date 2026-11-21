@@ -223,7 +223,7 @@ class PackageMenuTests(unittest.TestCase):
             database = Path(command[command.index("--preview") + 1])
             panel = json.loads((database.parent / "panel.json").read_text())
             self.assertFalse(panel["multi"])
-            self.assertIn("Helper: paru", panel["notes"])
+            self.assertNotIn("notes", panel)
             self.assertIn("--with-nth=2", args)
             return subprocess.CompletedProcess([], 130, "")
 
@@ -241,7 +241,8 @@ class PackageMenuTests(unittest.TestCase):
         rows = shortcut_rows(output)
         self.assertEqual(rows["Ctrl+A"], "Update system")
         self.assertEqual(rows["Ctrl+O"], "Open settings")
-        self.assertIn("Helper: paru", output)
+        self.assertNotIn("Helper: paru", output)
+        self.assertNotIn("Status", plain_preview(output).splitlines())
         self.assertNotIn("Selection", output)
         capture.assert_not_called()
 
@@ -315,7 +316,11 @@ class PackageMenuTests(unittest.TestCase):
             self.assertIn("cachyos-v3/steam", output.getvalue())
             self.assertIn("old-aur-selection", output.getvalue())
             self.assertIn("aur/old-aur-selection", json.loads(database.read_text()))
-            self.assertIn("AUR unavailable", (directory / "status.txt").read_text())
+            self.assertIn("offline", (directory / "search-error.txt").read_text())
+            with contextlib.redirect_stdout(io.StringIO()) as preview_output:
+                app.preview_shortcuts(directory, records[0])
+            self.assertIn("AUR search unavailable", plain_preview(preview_output.getvalue()))
+            self.assertNotIn("Status", plain_preview(preview_output.getvalue()).splitlines())
 
     def test_mixed_install_keeps_exact_targets_and_existing_aur_gate(self):
         records = [package("repo-package", source="multilib"), package("aur-package", kind="aur", source="aur")]
@@ -335,15 +340,44 @@ class PackageMenuTests(unittest.TestCase):
             with patch.object(app.time, "sleep"), patch.object(app, "aur_search", return_value=[package("steam-test", kind="aur", source="aur")]) as search, contextlib.redirect_stdout(io.StringIO()) as output:
                 app.merged_search(database, "s")
                 search.assert_not_called()
-                self.assertEqual((directory / "status.txt").read_text(), app.AUR_SEARCH_HINT)
-                self.assertIn("search box", app.AUR_SEARCH_HINT)
+                self.assertFalse((directory / "status.txt").exists())
+                self.assertFalse((directory / "search-error.txt").exists())
                 app.merged_search(database, "steam")
                 search.assert_called_once_with("steam", {"steam-test"})
-                self.assertEqual((directory / "status.txt").read_text(), "AUR search results: 1")
+                self.assertFalse((directory / "status.txt").exists())
+                self.assertFalse((directory / "search-error.txt").exists())
             lookup = json.loads(database.read_text())
             self.assertIn("multilib/steam", lookup)
             self.assertIn("aur/steam-test", lookup)
             self.assertIn("aur/steam-test", output.getvalue())
+
+    def test_successful_search_clears_errors_without_creating_status(self):
+        record = package("example")
+        with preview_catalog(record) as database:
+            directory = database.parent
+            (directory / "installed.json").write_text("[]")
+            (directory / "search-error.txt").write_text("previous error")
+            with patch.object(app.time, "sleep"), patch.object(app, "aur_search", return_value=[]), contextlib.redirect_stdout(io.StringIO()):
+                app.merged_search(database, "example")
+            self.assertFalse((directory / "search-error.txt").exists())
+            self.assertFalse((directory / "status.txt").exists())
+            with patch.object(app, "capture", return_value=""):
+                output = plain_preview(render_preview(database, record, show_shortcuts=True))
+            self.assertNotIn("Status", output.splitlines())
+            self.assertNotIn("AUR search unavailable", output)
+
+    def test_status_section_is_not_rendered_even_with_legacy_status_files(self):
+        record = package()
+        with preview_catalog(record) as database:
+            (database.parent / "status.txt").write_text("AUR search results: 100")
+            (database.parent / "panel.json").write_text(json.dumps({
+                "multi": True, "global_shortcuts": True, "notes": "Helper: paru",
+            }))
+            with patch.object(app, "capture", return_value=""):
+                output = plain_preview(render_preview(database, record, show_shortcuts=True))
+        self.assertNotIn("Status", output.splitlines())
+        self.assertNotIn("AUR search results", output)
+        self.assertNotIn("Helper: paru", output)
 
     def test_install_picker_automatically_reloads_both_sources(self):
         with patch.object(app, "capture", return_value="steam\n"), patch.object(app.subprocess, "run", return_value=subprocess.CompletedProcess([], 130, "")) as run:

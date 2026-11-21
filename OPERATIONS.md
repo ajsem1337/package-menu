@@ -65,8 +65,8 @@ the helper call; no whitelist or persistent IgnorePkg entry is written.
   `$XDG_STATE_HOME/package-menu/guard` (default `~/.local/state/package-menu/guard`).
   Its isolated scanner configuration ignores the caller's allow/ignore settings.
 - Preview/selector caches use private temporary files, removed on exit.
-- Fzf theme settings are read as data. Shortcuts and status appear in the right
-  pane, not above the list.
+- Fzf theme settings are read as data. Shortcuts and package details appear in
+  the right pane. AUR search failures show an error notice, not a status counter.
 - AUR installs/updates with Traur or the wrapper pause after completion to keep
   reports readable. Returning to the menu clears terminal output/scrollback;
   external tools keep their own logs.

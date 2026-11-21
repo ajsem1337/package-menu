@@ -21,7 +21,7 @@ import app
 
 @unittest.skipUnless(shutil.which("fzf"), "fzf is required")
 class TerminalTests(unittest.TestCase):
-    def picker(self, keys, *, multi=False, empty=False, notes="Side status", steps=None, rows=40,
+    def picker(self, keys, *, multi=False, empty=False, description="First action", steps=None, rows=40,
                term="xterm-256color"):
         with tempfile.TemporaryDirectory(prefix="package-menu-tui-") as directory:
             root = Path(directory)
@@ -39,11 +39,11 @@ class TerminalTests(unittest.TestCase):
                     app.configure_helper("pacman")
                     app.TRAUR_ENABLED = app.WRAPPER_ENABLED = False
                     records = [] if empty else app.menu_records([
-                        ("first", "First", "First action"), ("second", "Second", "Second action"),
+                        ("first", "First", description), ("second", "Second", "Second action"),
                     ])
                     selected = app.picker(
                         records, "Terminal test", multi=multi, searchable=multi,
-                        global_shortcuts=True, keys=notes,
+                        global_shortcuts=True,
                     )
                     result.write_text(json.dumps(selected))
                 except BaseException as error:
@@ -52,7 +52,7 @@ class TerminalTests(unittest.TestCase):
                     os._exit(0)
 
             output = bytearray()
-            pending = list(steps) if steps is not None else [(b"Side status", keys)]
+            pending = list(steps) if steps is not None else [(b"Show or hide panel", keys)]
             start = 0
             try:
                 deadline = time.monotonic() + 8
@@ -119,12 +119,12 @@ class TerminalTests(unittest.TestCase):
         self.assertEqual([record["id"] for record in selected[2]], ["first", "second"])
 
     def test_shift_arrows_really_scroll_down_and_back_up_in_kitty(self):
-        notes = "SCROLL_START\n" + "\n".join(f"Panel line {index}" for index in range(40)) + "\nSCROLL_END"
+        description = "SCROLL_START " + "Panel text " * 220 + "SCROLL_END"
         selected, _ = self.picker(
-            None, rows=20, term="xterm-kitty", notes=notes,
+            None, rows=20, term="xterm-kitty", description=description,
             steps=[
-                (b"Navigation", b"\x1b[1;2B" * 45),
-                (b"SCROLL_END", b"\x1b[1;2A" * 45),
+                (b"Navigation", b"\x1b[1;2B" * 50),
+                (b"SCROLL_END", b"\x1b[1;2A" * 50),
                 (b"Navigation", b"\x0f"),
             ],
         )

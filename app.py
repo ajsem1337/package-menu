@@ -37,7 +37,6 @@ WRAPPER_ENABLED = False
 BUNDLED_WRAPPER = HERE.parent / "makepkg-wrapper"
 PREVIEW_MODE = "details"
 LAST_SKIPPED = []
-AUR_SEARCH_HINT = "AUR search starts after 2 characters in the search box."
 GITHUB_SOURCE_ARCHIVE = "https://codeload.github.com/ajsem1337/package-menu/tar.gz/refs/heads/main"
 MAX_UPDATE_ARCHIVE_SIZE = 25 * 1024 * 1024
 MAX_UPDATE_FILE_SIZE = 1024 * 1024
@@ -385,24 +384,26 @@ def merged_search(database, query):
     time.sleep(0.3)
     directory = Path(database).parent
     lookup = json.loads(Path(database).read_text())
-    status = AUR_SEARCH_HINT
+    error_message = ""
     if not AUR_HELPER:
         lookup = {key: record for key, record in lookup.items() if record["kind"] != "aur"}
-        status = "Pacman only · AUR disabled"
     elif len(query.strip()) >= 2:
         try:
             installed = set(json.loads((directory / "installed.json").read_text()))
             aur = aur_search(query, installed)
             lookup.update({record["id"]: record for record in aur})
-            status = f"AUR search results: {len(aur)}"
         except (Error, OSError, ValueError, KeyError) as error:
-            status = "AUR unavailable (local/cached results only): " + text(error)
+            error_message = "Using local and cached results. " + text(error)
     # Keep prior entries available for previews and selections during reload.
     with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as output:
         json.dump(lookup, output)
         temporary = Path(output.name)
     temporary.replace(database)
-    (directory / "status.txt").write_text(status)
+    error_file = directory / "search-error.txt"
+    if error_message:
+        error_file.write_text(error_message)
+    else:
+        error_file.unlink(missing_ok=True)
     print(picker_rows(sorted(lookup.values(), key=source_order)), flush=True)
 
 
@@ -479,7 +480,7 @@ def preview_mode(database, mode, identifier=None):
     return "refresh-preview"
 
 
-def picker(records, title, query="", multi=True, keys="", preview=True, searchable=True, merged=False, show_state=True,
+def picker(records, title, query="", multi=True, preview=True, searchable=True, merged=False, show_state=True,
            global_shortcuts=False):
     clear_console()
     runtime = os.environ.get("XDG_RUNTIME_DIR")
@@ -492,8 +493,6 @@ def picker(records, title, query="", multi=True, keys="", preview=True, searchab
             header = "Tab multi · Enter confirm · Esc back · Shift+←/→ resize\nCtrl+A all · Ctrl+D clear · Alt+P preview · Alt+T Traur audit"
         else:
             header = "↑/↓ choose · Enter open · Esc exit"
-        if keys and not preview:
-            header += ("\n" if header else "") + keys
         if multi:
             header += ("\n" if header else "") + f"{'SOURCE':<16} {'PACKAGE':<26} {'VERSION':<14}"
             if show_state:
@@ -513,7 +512,6 @@ def picker(records, title, query="", multi=True, keys="", preview=True, searchab
                      "--with-nth=2" if preview else "--with-nth=2,4", "--nth=1"]
         if merged:
             (Path(directory) / "installed.json").write_text(json.dumps(capture(["pacman", "-Qq"]).splitlines()))
-            (Path(directory) / "status.txt").write_text(AUR_SEARCH_HINT)
             command = "exec " + shlex.join(frontend_command("--search", str(database))) + " {q}"
             args += ["--id-nth=1", "--bind=start:reload-sync(" + command + "),change:reload-sync(" + command + ")",
                      "--bind=load:refresh-preview"]
@@ -522,7 +520,7 @@ def picker(records, title, query="", multi=True, keys="", preview=True, searchab
         if preview:
             (Path(directory) / "preview-mode").write_text(PREVIEW_MODE)
             (Path(directory) / "panel.json").write_text(json.dumps({
-                "multi": multi, "global_shortcuts": global_shortcuts, "notes": keys,
+                "multi": multi, "global_shortcuts": global_shortcuts,
             }))
             # {q} also runs the panel when the result list is empty.
             command = shlex.join(frontend_command("--preview", str(database), "--shortcuts")) + " {1} {q}"
@@ -713,16 +711,17 @@ def preview_shortcuts(directory, record, palette=None):
             ("Alt+B", "View AUR PKGBUILD"),
             ("Alt+T", "Run Traur audit"),
         ])
-    status = directory / "status.txt"
-    notes = [panel.get("notes", ""), status.read_text() if status.exists() else ""]
-    if any(notes):
-        panel_heading("Status", palette)
-        for note in filter(None, notes):
-            for line in note.splitlines():
-                print("  " + text(line))
+    error_file = directory / "search-error.txt"
+    if error_file.exists():
+        panel_heading("AUR search unavailable", palette)
+        width = max(24, int(os.environ.get("FZF_PREVIEW_COLUMNS", "80")))
+        print(textwrap.fill(text(error_file.read_text()), width=width,
+                            initial_indent="  ", subsequent_indent="  ", break_on_hyphens=False))
     if record and record["kind"] == "menu" and record.get("description"):
         print("\n" + text(record["name"]))
-        print(text(record["description"]))
+        width = max(24, int(os.environ.get("FZF_PREVIEW_COLUMNS", "80")))
+        print(textwrap.fill(text(record["description"]), width=width,
+                            initial_indent="  ", subsequent_indent="  ", break_on_hyphens=False))
     print(flush=True)
 
 
@@ -886,14 +885,6 @@ def skip_package(record, reason, approval_keys=(), preflight=False, updating=Fal
     LAST_SKIPPED[:] = [item for item in LAST_SKIPPED if item["name"] != entry["name"]]
     LAST_SKIPPED.append(entry)
     print(f"\nSKIPPED {entry['name']}: {entry['reason']}", flush=True)
-
-
-def skipped_summary():
-    if not LAST_SKIPPED:
-        return ""
-    names = ", ".join(item["name"] for item in LAST_SKIPPED[:4])
-    extra = f" (+{len(LAST_SKIPPED) - 4})" if len(LAST_SKIPPED) > 4 else ""
-    return "Skipped AUR: " + names + extra + " · See Skipped packages in the main menu"
 
 
 def run_aur_target(record, updating=False, force=False, approval_keys=()):
@@ -1383,9 +1374,8 @@ def browse(action):
         records = sorted(catalog(mode, query), key=source_order)
         title = {"install": "Find & install", "remove": "Installed / uninstall", "downgrade": "Downgrade (cache only)"}[action]
         merged = action == "install" and bool(AUR_HELPER)
-        hints = skipped_summary()
         suffix = (" — repos + AUR" if merged else " — repositories") if action == "install" else " — installed"
-        selected = picker(records, title + suffix, query, keys=hints, merged=merged,
+        selected = picker(records, title + suffix, query, merged=merged,
                           show_state=action == "install", global_shortcuts=True)
         if selected is None:
             return
@@ -1428,8 +1418,7 @@ def helper_menu():
         ("aura", "Aura 4+", ""),
         ("custom", "Custom helper", "Executable and command syntax"),
     ])
-    selected = picker(choices, "Settings — AUR helper", multi=False, searchable=False,
-                      keys="Selected: " + text(settings["helper"]) + "\nActive helper: " + text(AUR_HELPER or "pacman"))
+    selected = picker(choices, "Settings — AUR helper", multi=False, searchable=False)
     if selected is None or not selected[2]:
         return
     helper = selected[2][0]["id"]
@@ -1479,8 +1468,7 @@ def settings_records(settings):
 def settings_menu():
     while True:
         settings = read_settings()
-        selected = picker(settings_records(settings), "Settings", multi=False, searchable=False,
-                          keys="Active helper: " + text(AUR_HELPER or "pacman"))
+        selected = picker(settings_records(settings), "Settings", multi=False, searchable=False)
         if selected is None or not selected[2] or selected[2][0]["id"] == "back":
             return
         action = selected[2][0]["id"]
@@ -1544,8 +1532,6 @@ def main():
     while True:
         try:
             selected = picker(main_records(), "Packages", multi=False, searchable=False,
-                              keys=("Helper: " + text(AUR_HELPER) if AUR_HELPER else "Pacman only · AUR disabled")
-                                   + ("\n" + skipped_summary() if LAST_SKIPPED else ""),
                               global_shortcuts=True)
             if selected is None:
                 return

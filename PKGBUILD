@@ -1,5 +1,5 @@
 pkgname=package-menu-git
-pkgver=1.3.3
+pkgver=1.3.4
 pkgrel=1
 pkgdesc='TUI for managing Arch Linux system packages'
 arch=('any')
