@@ -1,6 +1,6 @@
 # package-menu
 
-![Made with AI](https://img.shields.io/badge/Made%20with-AI-76ddcf)
+![Made with AI](https://raw.githubusercontent.com/ajsem1337/ajsem1337/main/assets/made-with-ai.svg)
 
 A TUI for managing Arch Linux system packages, inspired by [Omarchy](https://omarchy.org).
 
@@ -93,3 +93,7 @@ python3 -I app.py
 Installation supports `PREFIX` and `DESTDIR`.
 
 MIT — [LICENSE](LICENSE) · [Omarchy attribution](LICENSE-OMARCHY).
+
+---
+
+<p align="center"><sub>Built by <a href="https://github.com/ajsem1337">ajsem</a> with AI assistance.</sub></p>
